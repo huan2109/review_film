@@ -32,7 +32,7 @@ class SubShot:
 
 
 class VideoEditorService:
-    """Engine Audio-Lead B-Roll Chopper (FFmpeg Safe AAC Cut & Clean Concat - KHÔNG HARDCODE SUB)."""
+    """Engine Audio-Lead B-Roll Chopper (FFmpeg Safe Cut, -nostdin, timeout=30 & Clean Concat - KHÔNG HARDCODE SUB)."""
 
     def __init__(self, fps: float = 30.0):
         self.fps = fps
@@ -138,7 +138,8 @@ class VideoEditorService:
         progress_callback=None
     ) -> str:
         """
-        Ghép tất cả các vết cắt sub-shots B-Roll theo Monotonic Timecode ra file MP4 HOÀN TOÀN SẠCH SẼ (KHÔNG HARDCODE SUB).
+        Ghép tất cả các vết cắt sub-shots B-Roll ra file MP4 HOÀN TOÀN SẠCH SẼ (KHÔNG HARDCODE SUB)
+        SỬ DỤNG -nostdin, timeout=30 VÀ CHỐNG ĐƠ / TREO TIẾN TRÌNH UI.
         """
         if not source_video_path or not os.path.exists(source_video_path):
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
@@ -172,10 +173,12 @@ class VideoEditorService:
                     global_shot_idx += 1
                     clip_out_path = os.path.join(temp_dir, f"shot_{global_shot_idx:04d}.mp4")
 
-                    # LỆNH CẮT SHOT AN TOÀN CHỐNG CRASH AAC DECODER: KHÔNG DÍNH SUB, ÉP 30 FPS CỐ ĐỊNH
+                    # LỆNH CẮT SHOT CHỐNG ĐƠ / TREO PROGRESS: THÊM -nostdin, -loglevel error, timeout=30
                     cmd_cut = [
                         ffmpeg_executable,
                         "-y",
+                        "-nostdin",  # Ngăn FFmpeg chờ input từ stdin làm treo tiến trình
+                        "-loglevel", "error",
                         "-ss", str(shot.source_start_sec),
                         "-i", str(source_video_path),
                         "-t", str(shot.duration_sec),
@@ -185,13 +188,31 @@ class VideoEditorService:
                         "-preset", "ultrafast",
                         "-crf", "22",
                         "-sn",  # Tắt toàn bộ Subtitle Stream
+                        "-dn",
                         str(clip_out_path)
                     ]
-                    res_cut = subprocess.run(cmd_cut, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    if res_cut.returncode != 0:
-                        raise RuntimeError(f"FFmpeg Clip Cut Error (Shot #{global_shot_idx}): {res_cut.stderr}")
 
-                    clip_paths.append(clip_out_path)
+                    try:
+                        res_cut = subprocess.run(
+                            cmd_cut,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            timeout=30  # Giới hạn 30 giây cho 1 shot, tránh bị đơ vĩnh viễn
+                        )
+
+                        if res_cut.returncode == 0 and os.path.exists(clip_out_path) and os.path.getsize(clip_out_path) > 0:
+                            clip_paths.append(clip_out_path)
+                        else:
+                            print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} bị lỗi FFmpeg cut (code {res_cut.returncode}), bỏ qua!")
+
+                    except subprocess.TimeoutExpired:
+                        print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} bị timeout (quá 30s), tự động bỏ qua!")
+                    except Exception as e:
+                        print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} gặp ngoại lệ {e}, bỏ qua!")
+
+            if not clip_paths:
+                raise RuntimeError("Không cắt được clip B-Roll hợp lệ nào từ video gốc!")
 
             with open(concat_list_path, "w", encoding="utf-8") as f:
                 for cp in clip_paths:
@@ -204,6 +225,8 @@ class VideoEditorService:
             # LỆNH CONCAT TOÀN BỘ SHOTS THUẦN (HOÀN TOÀN KHÔNG DÙNG -vf subtitles)
             cmd_concat = [
                 ffmpeg_executable, "-y",
+                "-nostdin",
+                "-loglevel", "error",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_list_path,
                 "-c:v", "libx264",
@@ -211,12 +234,22 @@ class VideoEditorService:
                 "-crf", "22",
                 "-an",
                 "-sn",
+                "-dn",
                 str(output_mp4_path)
             ]
 
-            res_concat = subprocess.run(cmd_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res_concat.returncode != 0:
-                raise RuntimeError(f"FFmpeg Clean Concat Error: {res_concat.stderr}")
+            try:
+                res_concat = subprocess.run(
+                    cmd_concat,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=300  # Timeout 5 phút cho bước concat toàn bộ
+                )
+                if res_concat.returncode != 0:
+                    raise RuntimeError(f"FFmpeg Clean Concat Error: {res_concat.stderr}")
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("FFmpeg Clean Concat bị timeout (quá 5 phút)!")
 
             return output_mp4_path
 
@@ -229,7 +262,7 @@ class VideoEditorService:
         if not tc_str:
             return 0.0
         tc_clean = tc_str.replace(',', '.')
-        timecodes = re.findall(r'\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?', tc_clean)
+        timecodes = re.findall(r'\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?', tc_clean)
         if timecodes:
             parts = timecodes[0].split(':')
             if len(parts) == 3:
