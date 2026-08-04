@@ -139,7 +139,7 @@ class VideoEditorService:
     ) -> str:
         """
         Ghép tất cả các vết cắt sub-shots B-Roll ra file MP4 HOÀN TOÀN SẠCH SẼ (KHÔNG HARDCODE SUB)
-        SỬ DỤNG -nostdin, timeout=30 VÀ CHỐNG ĐƠ / TREO TIẾN TRÌNH UI.
+        SỬ DỤNG -nostdin, timeout=30 VÀ TỐI ƯU SIÊU NHANH TỐC ĐỘ / CPU.
         """
         if not source_video_path or not os.path.exists(source_video_path):
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
@@ -173,22 +173,19 @@ class VideoEditorService:
                     global_shot_idx += 1
                     clip_out_path = os.path.join(temp_dir, f"shot_{global_shot_idx:04d}.mp4")
 
-                    # LỆNH CẮT SHOT CHỐNG ĐƠ / TREO PROGRESS: THÊM -nostdin, -loglevel error, timeout=30
+                    # LỆNH CẮT SHOT SIÊU NHANH & TỐI ƯU CPU (TUA CHÍNH XÁC VỚI -i TRƯỚC -ss)
                     cmd_cut = [
                         ffmpeg_executable,
                         "-y",
-                        "-nostdin",  # Ngăn FFmpeg chờ input từ stdin làm treo tiến trình
-                        "-loglevel", "error",
-                        "-ss", str(shot.source_start_sec),
-                        "-i", str(source_video_path),
-                        "-t", str(shot.duration_sec),
-                        "-an",  # Tắt Audio gốc
-                        "-r", "30",  # Ép 30 FPS cố định
-                        "-c:v", "libx264",
-                        "-preset", "ultrafast",
-                        "-crf", "22",
-                        "-sn",  # Tắt toàn bộ Subtitle Stream
-                        "-dn",
+                        "-nostdin",                     # Chống treo IO
+                        "-loglevel", "error",           # Chỉ xuất lỗi nặng
+                        "-i", str(source_video_path),   # Đọc file đầu vào trước
+                        "-ss", str(shot.source_start_sec), # Tua thời gian chính xác
+                        "-t", str(shot.duration_sec),   # Thời lượng shot
+                        "-c:v", "libx264",              # Encode chuẩn H.264
+                        "-preset", "ultrafast",         # Tốc độ cắt tối đa (nhẹ CPU)
+                        "-crf", "23",                   # Tối ưu dung lượng
+                        "-an", "-sn", "-dn",            # Tắt Audio, Sub, Data stream rác
                         str(clip_out_path)
                     ]
 
@@ -231,10 +228,8 @@ class VideoEditorService:
                 "-i", concat_list_path,
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "22",
-                "-an",
-                "-sn",
-                "-dn",
+                "-crf", "23",
+                "-an", "-sn", "-dn",
                 str(output_mp4_path)
             ]
 
