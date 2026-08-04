@@ -6,6 +6,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from src.services.srt_parser import SRTParser
 from src.services.gemini_service import GeminiService, DynamicPromptConfig
+from src.services.script_parser_service import ScriptParserService
 from src.services.video_editor_service import VideoEditorService
 from src.exporters.srt_exporter import SRTExporter
 
@@ -13,7 +14,7 @@ from src.exporters.srt_exporter import SRTExporter
 class ScriptParseWorker(QThread):
     """
     Worker Thread chạy ngầm bóc tách dữ liệu kịch bản thô & đối chiếu thông minh với Sub SRT gốc
-    GIỮ NGUYÊN 100% TIMECODE GỐC CỦA KỊCH BẢN / PHIM.
+    hỗ trợ 3 định dạng (Giây, Timecode chuẩn, JSON Object Array) và KHÔNG TREO UI.
     """
 
     finished_signal = pyqtSignal(list)
@@ -33,8 +34,8 @@ class ScriptParseWorker(QThread):
 
     def run(self):
         try:
-            # 1. Bóc tách kịch bản thô (JSON / Bảng Markdown 3 cột / Text)
-            scenes = self.gemini_service._parse_and_validate_json(self.raw_script)
+            # 1. Bóc tách kịch bản thô qua ScriptParserService (Giây / HH:MM:SS / JSON Array)
+            scenes = ScriptParserService.parse_raw_script(self.raw_script)
 
             # 2. Nếu người dùng chọn file Sub SRT gốc, đối chiếu thông minh giữ nguyên timecode chuẩn
             if self.srt_path and os.path.exists(self.srt_path):
