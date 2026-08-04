@@ -6,9 +6,9 @@ from typing import List, Dict, Any
 class ScriptParserService:
     """
     Service chuyên trách bóc tách kịch bản linh hoạt từ ô văn bản Kịch Bản Thô:
-    1. Định dạng theo Giây: ID | Voice lời bình | float_in -> float_out
-    2. Định dạng Timecode chuẩn: ID | Voice lời bình | HH:MM:SS,mmm -> HH:MM:SS,mmm
-    3. Định dạng JSON Object Array: [{"id": 1, "voice": "...", "in": 24.441, "out": 37.078}]
+    Cấu trúc chuẩn: | ID | Lời Thuyết Minh | Timecode In -> Timecode Out |
+    Ví dụ: | 46 | Trở về ngôi nhà xưa... | 3247.953 -> 3306.261 |
+    hoặc JSON Object Array: [{"id": 1, "voice": "...", "in": 24.441, "out": 37.078}]
     """
 
     @classmethod
@@ -24,7 +24,7 @@ class ScriptParserService:
 
         # 1. Thử parse dạng JSON Array
         data = cls._try_parse_json(cleaned)
-        if not data and ("|" in cleaned or "->" in cleaned or "➜" in cleaned):
+        if not data and ("|" in cleaned or "->" in cleaned or "➜" in cleaned or " - " in cleaned):
             data = cls._parse_flexible_line_script(cleaned)
 
         if not data:
@@ -54,22 +54,42 @@ class ScriptParserService:
 
         for line in lines:
             line_str = line.strip()
-            if not line_str or line_str.startswith("---") or ("STT" in line_str and "Voice" in line_str):
+            if not line_str or line_str.startswith("---") or ("STT" in line_str and "Voice" in line_str) or ("ID" in line_str and "Thuyết Minh" in line_str):
                 continue
 
-            parts = [p.strip() for p in line_str.split("|")]
+            # Strip dấu | ở đầu và cuối dòng cùng khoảng trắng
+            clean_line = line_str.strip().strip("|").strip()
+            parts = [p.strip() for p in clean_line.split("|")]
+
             if len(parts) >= 3:
+                # Phần tử 0: ID (Ví dụ: 46)
                 stt_val = parts[0]
                 try:
                     scene_id = int(re.sub(r"\D", "", stt_val)) if re.sub(r"\D", "", stt_val) else len(scenes) + 1
                 except Exception:
                     scene_id = len(scenes) + 1
 
+                # Phần tử 1: Lời Thuyết Minh
                 voice_text = parts[1]
+
+                # Phần tử 2: Timecode In -> Timecode Out (Ví dụ: 3247.953 -> 3306.261)
                 tc_str = parts[2]
 
                 in_tc, out_tc = cls._extract_timecodes_from_str(tc_str)
 
+                scenes.append({
+                    "scene_id": scene_id,
+                    "section_type": "BODY",
+                    "in_time": in_tc,
+                    "out_time": out_tc,
+                    "review_text": voice_text,
+                    "visual_suggestion": f"Cảnh B-Roll phân cảnh {scene_id}",
+                })
+            elif len(parts) == 2:
+                voice_text = parts[0]
+                tc_str = parts[1]
+                in_tc, out_tc = cls._extract_timecodes_from_str(tc_str)
+                scene_id = len(scenes) + 1
                 scenes.append({
                     "scene_id": scene_id,
                     "section_type": "BODY",
