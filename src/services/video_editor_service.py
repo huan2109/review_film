@@ -32,7 +32,7 @@ class SubShot:
 
 
 class VideoEditorService:
-    """Engine Audio-Lead B-Roll Chopper (FFmpeg Safe Cut, -nostdin, timeout=30 & Clean Concat - KHÔNG HARDCODE SUB)."""
+    """Engine Audio-Lead B-Roll Chopper (FFmpeg Safe Cut, -nostdin, timeout=15 & Clean Concat - KHÔNG HARDCODE SUB)."""
 
     def __init__(self, fps: float = 30.0):
         self.fps = fps
@@ -139,7 +139,7 @@ class VideoEditorService:
     ) -> str:
         """
         Ghép tất cả các vết cắt sub-shots B-Roll ra file MP4 HOÀN TOÀN SẠCH SẼ (KHÔNG HARDCODE SUB)
-        SỬ DỤNG -nostdin, timeout=30 VÀ TỐI ƯU SIÊU NHANH TỐC ĐỘ / CPU.
+        SỬ DỤNG -nostdin, timeout=15 VÀ TỐI ƯU SIÊU NHANH TỐC ĐỘ / CPU.
         """
         if not source_video_path or not os.path.exists(source_video_path):
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
@@ -195,7 +195,7 @@ class VideoEditorService:
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
                             text=True,
-                            timeout=30  # Giới hạn 30 giây cho 1 shot, tránh bị đơ vĩnh viễn
+                            timeout=15  # Giới hạn tối đa 15 giây cho 1 shot ngắn
                         )
 
                         if res_cut.returncode == 0 and os.path.exists(clip_out_path) and os.path.getsize(clip_out_path) > 0:
@@ -204,9 +204,11 @@ class VideoEditorService:
                             print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} bị lỗi FFmpeg cut (code {res_cut.returncode}), bỏ qua!")
 
                     except subprocess.TimeoutExpired:
-                        print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} bị timeout (quá 30s), tự động bỏ qua!")
+                        print(f"⚠️ Shot #{global_shot_idx} bị quá thời gian (timeout), bỏ qua để tránh treo máy!")
+                        continue
                     except Exception as e:
                         print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} gặp ngoại lệ {e}, bỏ qua!")
+                        continue
 
             if not clip_paths:
                 raise RuntimeError("Không cắt được clip B-Roll hợp lệ nào từ video gốc!")
