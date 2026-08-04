@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 import traceback
 from typing import List, Dict, Any
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -9,6 +10,8 @@ from src.services.gemini_service import GeminiService, DynamicPromptConfig
 from src.services.script_parser_service import ScriptParserService
 from src.services.video_editor_service import VideoEditorService
 from src.exporters.srt_exporter import SRTExporter
+
+logger = logging.getLogger("AutoReviewLite.WorkerThread")
 
 
 class ScriptParseWorker(QThread):
@@ -34,19 +37,22 @@ class ScriptParseWorker(QThread):
 
     def run(self):
         try:
-            # 1. Bóc tách kịch bản thô qua ScriptParserService (Giây / HH:MM:SS / JSON Array)
+            logger.info("🚀 Bắt đầu ScriptParseWorker parse kịch bản thô...")
             scenes = ScriptParserService.parse_raw_script(self.raw_script)
 
-            # 2. Nếu người dùng chọn file Sub SRT gốc, đối chiếu thông minh giữ nguyên timecode chuẩn
             if self.srt_path and os.path.exists(self.srt_path):
+                logger.info(f"🔍 ScriptParseWorker đối chiếu Sub SRT: {self.srt_path}")
                 scenes = self.gemini_service._match_voice_to_srt_timecodes(scenes, self.srt_path)
 
             if not scenes:
                 raise ValueError("Không bóc tách được phân cảnh nào từ kịch bản thô.")
 
+            logger.info(f"✅ ScriptParseWorker parse thành công {len(scenes)} phân cảnh.")
             self.finished_signal.emit(scenes)
 
         except Exception as e:
+            err_details = traceback.format_exc()
+            logger.error(f"❌ ScriptParseWorker Lỗi: {e}\n{err_details}")
             self.error_signal.emit(str(e))
 
 
@@ -74,6 +80,7 @@ class GeminiSrtGenWorker(QThread):
 
     def run(self):
         try:
+            logger.info(f"🤖 Bắt đầu GeminiSrtGenWorker ({self.model_name}) từ SRT: {self.srt_path}")
             parser = SRTParser(self.srt_path)
             items = parser.load_and_parse()
             if not items:
@@ -94,17 +101,16 @@ class GeminiSrtGenWorker(QThread):
             if not scenes:
                 raise ValueError("Gemini AI không trả về phân cảnh kịch bản nào.")
 
+            logger.info(f"✅ GeminiSrtGenWorker tạo thành công {len(scenes)} Shots kịch bản.")
             self.finished_signal.emit(scenes)
 
         except Exception as e:
+            err_details = traceback.format_exc()
+            logger.error(f"❌ GeminiSrtGenWorker Lỗi: {e}\n{err_details}")
             self.error_signal.emit(str(e))
 
 
 class GeminiAnalysisWorker(QThread):
-    """
-    Worker Thread Bước 1: Đọc SRT và thực hiện Phân tích Timeline & Cốt truyện chuyên sâu (NotebookLM Mode).
-    """
-
     status_updated = pyqtSignal(str)
     analysis_finished = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
@@ -117,6 +123,7 @@ class GeminiAnalysisWorker(QThread):
 
     def run(self):
         try:
+            logger.info(f"🧠 Bắt đầu GeminiAnalysisWorker SRT: {self.srt_file_path}")
             self.status_updated.emit("📄 Đang đọc và tối ưu dung lượng Token file SRT...")
             parser = SRTParser(self.srt_file_path)
             items = parser.load_and_parse()
@@ -135,15 +142,12 @@ class GeminiAnalysisWorker(QThread):
             self.analysis_finished.emit(analysis_result)
 
         except Exception as e:
-            error_msg = f"Lỗi trong quá trình Phân tích Timeline SRT: {str(e)}\n\nChi tiết:\n{traceback.format_exc()}"
-            self.error_occurred.emit(error_msg)
+            err_msg = f"Lỗi trong quá trình Phân tích Timeline SRT: {str(e)}\n\nChi tiết:\n{traceback.format_exc()}"
+            logger.error(f"❌ GeminiAnalysisWorker Lỗi: {err_msg}")
+            self.error_occurred.emit(err_msg)
 
 
 class GeminiScriptWorker(QThread):
-    """
-    Worker Thread Bước 2: Kế thừa 100% Phân tích từ Bước 1 (hoặc NotebookLM Context) để sinh kịch bản review 100 shots.
-    """
-
     status_updated = pyqtSignal(str)
     script_generated = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
@@ -155,13 +159,14 @@ class GeminiScriptWorker(QThread):
 
     def run(self):
         try:
+            logger.info("🚀 Bắt đầu GeminiScriptWorker Bước 2...")
             service = GeminiService(
                 api_key=self.config.api_key,
                 model_name=self.config.selected_model
             )
 
             if self.config.analysis_context and self.config.analysis_context.strip():
-                self.status_updated.emit(f"🚀 BƯỚC 2: Kế thừa Bản phân tích (không gửi lại SRT thô)... Đang sinh kịch bản {self.config.selected_model}...")
+                self.status_updated.emit(f"🚀 BƯỚC 2: Kế thừa Bản phân tích... Đang sinh kịch bản {self.config.selected_model}...")
                 scenes = service.generate_review_script_from_analysis(
                     config=self.config,
                     analysis_text_from_step1=self.config.analysis_context.strip()
@@ -188,8 +193,9 @@ class GeminiScriptWorker(QThread):
             self.script_generated.emit(scenes)
 
         except Exception as e:
-            error_msg = f"Lỗi trong quá trình tạo kịch bản AI: {str(e)}\n\nChi tiết:\n{traceback.format_exc()}"
-            self.error_occurred.emit(error_msg)
+            err_msg = f"Lỗi trong quá trình tạo kịch bản AI: {str(e)}\n\nChi tiết:\n{traceback.format_exc()}"
+            logger.error(f"❌ GeminiScriptWorker Lỗi: {err_msg}")
+            self.error_occurred.emit(err_msg)
 
 
 class FFmpegRenderWorker(QThread):
@@ -209,6 +215,7 @@ class FFmpegRenderWorker(QThread):
 
     def run(self):
         try:
+            logger.info(f"🎬 Bắt đầu FFmpegRenderWorker. Source: {self.source_video_path} | Out: {self.output_mp4_path}")
             self.status_updated.emit("📝 Đang tạo file phụ đề thuyết minh tạm thời...", 5)
             temp_srt = os.path.join(os.path.dirname(os.path.abspath(self.output_mp4_path)), "temp_voiceover.srt")
             SRTExporter().export(self.scenes, temp_srt)
@@ -240,9 +247,11 @@ class FFmpegRenderWorker(QThread):
                 progress_callback=progress_cb
             )
 
+            logger.info(f"🎉 FFmpegRenderWorker hoàn tất xuất bản video: {rendered_mp4}")
             self.status_updated.emit("🎉 Render Video Review MP4 Hoàn Tất!", 100)
             self.render_finished.emit(rendered_mp4)
 
         except Exception as e:
-            error_msg = f"Lỗi trong quá trình Render MP4: {str(e)}\n\nChi tiết:\n{traceback.format_exc()}"
-            self.error_occurred.emit(error_msg)
+            err_msg = f"Lỗi trong quá trình Render MP4: {str(e)}\n\nChi tiết:\n{traceback.format_exc()}"
+            logger.error(f"❌ FFmpegRenderWorker Lỗi: {err_msg}")
+            self.error_occurred.emit(err_msg)

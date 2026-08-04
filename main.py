@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+import logging
 import traceback
 from typing import Any, Dict, List
 
@@ -28,6 +29,37 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QProgressBar
 )
+
+# 1. CẤU HÌNH LOGGING TOÀN CỤC VÀO FILE app_debug.log
+log_file_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "app_debug.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(name)s]: %(message)s",
+    handlers=[
+        logging.FileHandler(log_file_path, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger("AutoReviewLite")
+logger.info("==================================================")
+logger.info("BẮT ĐẦU KHỞI CHẠY ỨNG DỤNG AUTOREVIEW LITE (DEBUG MODE)")
+logger.info("==================================================")
+
+
+# 2. BẮT NGOẠI LỆ TOÀN CỤC (GLOBAL EXCEPTION HANDLER)
+def handle_global_exception(exc_type, exc_value, exc_traceback):
+    """Global Exception Handler - Ghi lại 100% lỗi crash/unhandled vào file app_debug.log"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    err_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    logger.critical(f"💥 PHÁT HIỆN LỖI CRASH TOÀN CỤC (UNHANDLED EXCEPTION):\n{err_msg}")
+    print(f"\n💥 LỖI TOÀN CỤC CRASH:\n{err_msg}", file=sys.stderr)
+
+sys.excepthook = handle_global_exception
+
 
 try:
     from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -154,7 +186,7 @@ class AutoReviewLiteApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AutoReview Lite - Master Clean JSON & Text Grid Version")
+        self.setWindowTitle("AutoReview Lite - Master Logging & Global Exception Handler Version")
         self.resize(1450, 900)
         self.script_data = []
 
@@ -373,6 +405,7 @@ class AutoReviewLiteApp(QMainWindow):
         )
         if f:
             self.txt_video_path.setText(f)
+            logger.info(f"📁 Người dùng chọn Source Video: {f}")
             if HAS_MULTIMEDIA and hasattr(self, "media_player"):
                 self.media_player.setSource(QUrl.fromLocalFile(f))
 
@@ -382,6 +415,7 @@ class AutoReviewLiteApp(QMainWindow):
         )
         if f:
             self.txt_srt_path.setText(f)
+            logger.info(f"📁 Người dùng chọn Sub SRT: {f}")
 
     def _on_btn_run_clicked(self):
         raw_script = self.txt_script_input.toPlainText().strip()
@@ -391,6 +425,7 @@ class AutoReviewLiteApp(QMainWindow):
             )
             return
 
+        logger.info("🚀 Người dùng bấm RUN (Tạo Kịch Bản Realtime)...")
         self.btn_run.setEnabled(False)
         self.status_label.setText(
             "🟡 Đang tạo kịch bản realtime & đối chiếu timecode..."
@@ -408,6 +443,7 @@ class AutoReviewLiteApp(QMainWindow):
     def _on_run_success(self, scenes):
         self.btn_run.setEnabled(True)
         self.script_data = scenes
+        logger.info(f"🟢 Nạp thành công {len(scenes)} Shots kịch bản lên Grid.")
         self._populate_table()
         self.status_label.setText(
             f"🟢 Đã tạo kịch bản realtime thành công với {len(scenes)} Shots!"
@@ -420,6 +456,7 @@ class AutoReviewLiteApp(QMainWindow):
 
     def _on_run_error(self, err_msg):
         self.btn_run.setEnabled(True)
+        logger.error(f"🔴 Lỗi khi RUN kịch bản: {err_msg}")
         self.status_label.setText("🔴 Lỗi đối chiếu kịch bản!")
         QMessageBox.critical(
             self, "Lỗi đối chiếu", f"Không thể xử lý kịch bản: {err_msg}"
@@ -446,6 +483,7 @@ class AutoReviewLiteApp(QMainWindow):
             )
             return
 
+        logger.info(f"🤖 Người dùng bấm Tạo Kịch Bản Từ Sub SRT qua Gemini ({selected_model})...")
         self.btn_gen_srt.setEnabled(False)
         self.status_label.setText(
             f"🤖 Gemini ({selected_model}) đang đọc Sub SRT và phân tích kịch"
@@ -465,6 +503,7 @@ class AutoReviewLiteApp(QMainWindow):
     def _on_srt_ai_success(self, scenes):
         self.btn_gen_srt.setEnabled(True)
         self.script_data = scenes
+        logger.info(f"🟢 Gemini AI tạo thành công {len(scenes)} Shots từ Sub SRT.")
         self._populate_table()
 
         self.status_label.setText(
@@ -478,24 +517,22 @@ class AutoReviewLiteApp(QMainWindow):
 
     def _on_srt_ai_error(self, err_msg):
         self.btn_gen_srt.setEnabled(True)
+        logger.error(f"🔴 Lỗi Gemini API: {err_msg}")
         self.status_label.setText("🔴 Lỗi tạo kịch bản từ Sub SRT!")
         QMessageBox.critical(
             self, "Lỗi Gemini API", f"Không thể tạo kịch bản từ SRT: {err_msg}"
         )
 
-    # ----- 1. SỬA HÀM NẠP DỮ LIỆU LÊN BẢNG GRID (_populate_table) -----
     def _populate_table(self):
         self.table_grid.setRowCount(0)
 
         for row_idx, scene in enumerate(self.script_data):
             self.table_grid.insertRow(row_idx)
 
-            # Xử lý lấy review_text sạch
             voice_text = ""
             if isinstance(scene, dict):
                 voice_text = str(scene.get("review_text", "")).strip()
             else:
-                # Trường hợp scene bị dính chuỗi String JSON
                 raw_str = str(scene)
                 match = re.search(
                     r'"review_text"\s*:\s*"([^"]+)"', raw_str, re.DOTALL
@@ -505,13 +542,11 @@ class AutoReviewLiteApp(QMainWindow):
                 else:
                     voice_text = raw_str
 
-            # Làm sạch tuyệt đối các ký tự JSON thừa còn sót
             voice_text = re.sub(
                 r'^"?review_text"?:?\s*"?', "", voice_text, flags=re.IGNORECASE
             )
             voice_text = voice_text.strip(' "',)
 
-            # Lấy các trường thông tin
             scene_id = (
                 scene.get("scene_id", row_idx + 1)
                 if isinstance(scene, dict)
@@ -528,7 +563,6 @@ class AutoReviewLiteApp(QMainWindow):
             dur_sec = float(scene.get("estimated_duration_sec", 5.0)) if isinstance(scene, dict) else 5.0
             timeline_str = f"{in_tc[:8]} ➜ {out_tc[:8]} ({dur_sec:.1f}s)" if in_tc and out_tc else f"({dur_sec:.1f}s)"
 
-            # Gán lên từng ô chuẩn xác
             self.table_grid.setItem(row_idx, 0, QTableWidgetItem(str(scene_id)))
             self.table_grid.setItem(row_idx, 1, QTableWidgetItem(in_tc))
             self.table_grid.setItem(row_idx, 2, QTableWidgetItem(out_tc))
@@ -593,7 +627,6 @@ class AutoReviewLiteApp(QMainWindow):
         except Exception:
             return 0
 
-    # ----- 2. SỬA HÀM XUẤT FILE THUYẾT MINH (.TXT) - CHỈ LẤY LỜI NÓI THUẦN TEXT -----
     def _on_export_voiceover_txt_clicked(self):
         if not hasattr(self, "script_data") or not self.script_data:
             QMessageBox.warning(
@@ -638,12 +671,14 @@ class AutoReviewLiteApp(QMainWindow):
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(full_voice_content)
 
+                logger.info(f"🔊 Xuất thành công File Thuyết Minh sạch: {file_path}")
                 QMessageBox.information(
                     self,
                     "Thành công",
                     f"Đã xuất File Thuyết Minh Thuần Text sạch 100% ra:\n{file_path}",
                 )
             except Exception as e:
+                logger.error(f"🔴 Lỗi xuất file thuyết minh: {e}")
                 QMessageBox.critical(
                     self, "Lỗi", f"Không thể xuất file thuyết minh: {str(e)}"
                 )
@@ -669,6 +704,7 @@ class AutoReviewLiteApp(QMainWindow):
             self.btn_run.setEnabled(False)
             self.btn_render.setEnabled(False)
             self.status_label.setText("🎬 Đang Render Video MP4 thuần (Sạch sẽ, KHÔNG SUB)...")
+            logger.info(f"🎬 Người dùng bấm Render Video MP4 -> Output: {file_path}")
 
             try:
                 from src.controllers.worker_thread import FFmpegRenderWorker
@@ -684,11 +720,13 @@ class AutoReviewLiteApp(QMainWindow):
             except Exception as e:
                 self.btn_run.setEnabled(True)
                 self.btn_render.setEnabled(True)
+                logger.error(f"🔴 Lỗi khởi tạo worker render: {e}")
                 QMessageBox.critical(self, "Lỗi Render", f"Không thể tạo worker render: {str(e)}")
 
     def _on_render_success(self, rendered_mp4_path: str):
         self.btn_run.setEnabled(True)
         self.btn_render.setEnabled(True)
+        logger.info(f"🎉 Render Video MP4 Thành Công: {rendered_mp4_path}")
         self.status_label.setText("🎉 Render Video MP4 Hoàn Tất (Clean Video, KHÔNG SUB)!")
         QMessageBox.information(
             self, "🎉 Render MP4 Thành Công",
@@ -698,6 +736,7 @@ class AutoReviewLiteApp(QMainWindow):
     def _on_render_error(self, error_msg: str):
         self.btn_run.setEnabled(True)
         self.btn_render.setEnabled(True)
+        logger.error(f"🔴 Lỗi Render MP4: {error_msg}")
         self.status_label.setText("🔴 Lỗi Render Video MP4!")
         QMessageBox.critical(
             self, "Lỗi Render Video", f"Không thể Render MP4:\n\n{error_msg}"

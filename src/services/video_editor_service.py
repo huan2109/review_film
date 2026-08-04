@@ -1,6 +1,8 @@
 import os
 import re
+import time
 import random
+import logging
 import subprocess
 import shutil
 from pathlib import Path
@@ -12,6 +14,8 @@ try:
     HAS_IMAGEIO_FFMPEG = True
 except ImportError:
     HAS_IMAGEIO_FFMPEG = False
+
+logger = logging.getLogger("AutoReviewLite.VideoEditorService")
 
 
 @dataclass
@@ -78,10 +82,6 @@ class VideoEditorService:
         min_shot_len: float = 2.0,
         max_shot_len: float = 4.5
     ) -> List[SubShot]:
-        """
-        Tự động chia nhỏ mốc in_time -> out_time thành các Sub-Shots tịnh tiến liên tục (Strict Monotonic),
-        không bị giật lùi timecode làm lặp hình video B-Roll.
-        """
         start_orig = self._tc_to_sec(in_time_str)
         end_orig = self._tc_to_sec(out_time_str)
 
@@ -119,7 +119,6 @@ class VideoEditorService:
         return subshots
 
     def attach_subshots_to_scenes(self, scenes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Gán trước danh sách subshots tịnh tiến liên tục vào từng phân cảnh kịch bản."""
         for scene in scenes:
             in_tc = scene.get("in_time", "")
             out_tc = scene.get("out_time", "")
@@ -139,12 +138,14 @@ class VideoEditorService:
     ) -> str:
         """
         Ghép tất cả các vết cắt sub-shots B-Roll ra file MP4 HOÀN TOÀN SẠCH SẼ (KHÔNG HARDCODE SUB)
-        SỬ DỤNG -nostdin, timeout=15 VÀ TỐI ƯU SIÊU NHANH TỐC ĐỘ / CPU.
+        GHI LOGGING CHI TIẾT TỪNG SHOT VÀO app_debug.log VÀ TỐI ƯU SIÊU NHANH TỐC ĐỘ / CPU.
         """
         if not source_video_path or not os.path.exists(source_video_path):
+            logger.error(f"File Video gốc không tồn tại: {source_video_path}")
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
 
         ffmpeg_executable = self.ffmpeg_bin or self.get_ffmpeg_exe_path()
+        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO. Source: {source_video_path} | Total scenes: {len(scenes)}")
 
         os.makedirs(os.path.dirname(os.path.abspath(output_mp4_path)), exist_ok=True)
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(output_mp4_path)), "temp_render")
@@ -173,7 +174,6 @@ class VideoEditorService:
                     global_shot_idx += 1
                     clip_out_path = os.path.join(temp_dir, f"shot_{global_shot_idx:04d}.mp4")
 
-                    # LỆNH CẮT SHOT SIÊU NHANH & TỐI ƯU CPU (TUA CHÍNH XÁC VỚI -i TRƯỚC -ss)
                     cmd_cut = [
                         ffmpeg_executable,
                         "-y",
@@ -189,6 +189,12 @@ class VideoEditorService:
                         str(clip_out_path)
                     ]
 
+                    t_start = time.time()
+                    logger.info(
+                        f"🎬 [Shot #{global_shot_idx}] Bắt đầu băm B-Roll: "
+                        f"mốc {shot.source_start_sec:.2f}s -> {shot.source_end_sec:.2f}s (dài {shot.duration_sec:.2f}s)..."
+                    )
+
                     try:
                         res_cut = subprocess.run(
                             cmd_cut,
@@ -197,20 +203,23 @@ class VideoEditorService:
                             text=True,
                             timeout=15  # Giới hạn tối đa 15 giây cho 1 shot ngắn
                         )
+                        t_elapsed = time.time() - t_start
 
                         if res_cut.returncode == 0 and os.path.exists(clip_out_path) and os.path.getsize(clip_out_path) > 0:
                             clip_paths.append(clip_out_path)
+                            logger.info(f"✅ [Shot #{global_shot_idx}] Băm B-Roll thành công trong {t_elapsed:.2f}s -> {clip_out_path}")
                         else:
-                            print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} bị lỗi FFmpeg cut (code {res_cut.returncode}), bỏ qua!")
+                            logger.error(f"⚠️ [Shot #{global_shot_idx}] Lỗi FFmpeg cut (code {res_cut.returncode}): {res_cut.stderr}")
 
                     except subprocess.TimeoutExpired:
-                        print(f"⚠️ Shot #{global_shot_idx} bị quá thời gian (timeout), bỏ qua để tránh treo máy!")
+                        logger.warning(f"⚠️ [Shot #{global_shot_idx}] Bị quá thời gian (timeout > 15s), tự động bỏ qua!")
                         continue
                     except Exception as e:
-                        print(f"⚠️ Cảnh báo: Shot #{global_shot_idx} gặp ngoại lệ {e}, bỏ qua!")
+                        logger.error(f"⚠️ [Shot #{global_shot_idx}] Gặp ngoại lệ {e}, bỏ qua!")
                         continue
 
             if not clip_paths:
+                logger.error("Không cắt được clip B-Roll hợp lệ nào từ video gốc!")
                 raise RuntimeError("Không cắt được clip B-Roll hợp lệ nào từ video gốc!")
 
             with open(concat_list_path, "w", encoding="utf-8") as f:
@@ -221,7 +230,8 @@ class VideoEditorService:
             if progress_callback:
                 progress_callback("⚡ Đang ghép các vết cắt B-Roll thuần (Clean Video)...")
 
-            # LỆNH CONCAT TOÀN BỘ SHOTS THUẦN (HOÀN TOÀN KHÔNG DÙNG -vf subtitles)
+            logger.info(f"⚡ BẮT ĐẦU CONCAT {len(clip_paths)} SHOTS...")
+
             cmd_concat = [
                 ffmpeg_executable, "-y",
                 "-nostdin",
@@ -235,6 +245,7 @@ class VideoEditorService:
                 str(output_mp4_path)
             ]
 
+            t_concat_start = time.time()
             try:
                 res_concat = subprocess.run(
                     cmd_concat,
@@ -243,9 +254,15 @@ class VideoEditorService:
                     text=True,
                     timeout=300  # Timeout 5 phút cho bước concat toàn bộ
                 )
+                t_concat_elapsed = time.time() - t_concat_start
+
                 if res_concat.returncode != 0:
+                    logger.error(f"FFmpeg Clean Concat Error: {res_concat.stderr}")
                     raise RuntimeError(f"FFmpeg Clean Concat Error: {res_concat.stderr}")
+
+                logger.info(f"🎉 CONCAT THÀNH CÔNG TRONG {t_concat_elapsed:.2f}s -> {output_mp4_path}")
             except subprocess.TimeoutExpired:
+                logger.error("FFmpeg Clean Concat bị timeout (quá 5 phút)!")
                 raise RuntimeError("FFmpeg Clean Concat bị timeout (quá 5 phút)!")
 
             return output_mp4_path
