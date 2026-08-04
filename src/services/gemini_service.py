@@ -55,7 +55,7 @@ class GeminiService:
 
     def parse_external_script_content(self, raw_content: str, srt_path: str = "") -> List[Dict[str, Any]]:
         """
-        Hàm parse kịch bản có sẵn (JSON / Bảng Markdown / Text) - GIỮ NGUYÊN TIMECODE GỐC 100%.
+        Hàm parse kịch bản linh hoạt (JSON / Bảng Pipe / Seconds / Timecode / Text) - GIỮ NGUYÊN TIMECODE GỐC 100%.
         """
         cleaned = raw_content.strip()
         scenes = self._parse_and_validate_json(cleaned)
@@ -174,11 +174,9 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
                 continue
 
             in_tc = str(scene.get("in_time", ""))
-            # Nếu scene đã có timecode chuẩn (không phải 00:00:00) -> Giữ nguyên
             if in_tc and in_tc != "00:00:00.000" and in_tc != "00:00:00":
                 continue
 
-            # Tìm đoạn Sub SRT có độ tương đồng từ ngữ cao nhất
             best_match = None
             max_score = 0
 
@@ -194,7 +192,6 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
                     max_score = score
                     best_match = item
 
-            # Gán Timecode khớp nhất từ Sub SRT vào Shot
             if best_match and max_score >= 2:
                 scene["in_time"] = best_match.start_time.replace(',', '.')
                 scene["out_time"] = best_match.end_time.replace(',', '.')
@@ -231,6 +228,9 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
             except Exception:
                 pass
 
+        if not data and ("|" in cleaned or "->" in cleaned or "➜" in cleaned):
+            data = self._parse_flexible_line_script(cleaned)
+
         if not data and "|" in cleaned and any(k in cleaned for k in ["STT", "Voice", "Timecode", "Lời thoại"]):
             data = self._parse_markdown_table_script(cleaned)
 
@@ -256,7 +256,7 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
                 review_str = str(item).strip()
                 item = {"review_text": review_str}
 
-            scene_id = item.get("scene_id", idx)
+            scene_id = item.get("id", item.get("scene_id", item.get("stt", idx)))
             section_type = str(item.get("section_type", "BODY")).upper()
 
             if section_type not in ["HOOK", "BODY", "STORYTELLING", "ANALYSIS", "OUTRO"]:
@@ -272,18 +272,21 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
 
             review_text = str(
                 item.get(
-                    "review_text", item.get("Voice lời bình", item.get("review", ""))
+                    "voice", item.get("review_text", item.get("text", item.get("Voice lời bình", item.get("review", ""))))
                 )
             ).strip()
 
-            in_time = str(item.get("in_time", item.get("start_time", ""))).strip()
-            out_time = str(item.get("out_time", item.get("end_time", ""))).strip()
+            in_val = item.get("in", item.get("in_time", item.get("start", item.get("start_time", ""))))
+            out_val = item.get("out", item.get("out_time", item.get("end", item.get("end_time", ""))))
+
+            in_time = self._normalize_timecode_value(in_val)
+            out_time = self._normalize_timecode_value(out_val)
             srt_range = str(item.get("original_srt_range", ""))
 
             visual_suggestion = str(
                 item.get(
                     "visual_suggestion",
-                    "Cảnh quay diễn biến nhân vật.",
+                    f"Cảnh B-Roll minh họa phân cảnh {scene_id}.",
                 )
             ).strip()
 
@@ -291,7 +294,12 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
             estimated_duration = item.get("estimated_duration_sec")
 
             if not estimated_duration or not isinstance(estimated_duration, (int, float)):
-                estimated_duration = round(max(2.5, min(10.0, word_count / 3.5)), 1)
+                sec_in = self._tc_to_sec(in_time)
+                sec_out = self._tc_to_sec(out_time)
+                if sec_out > sec_in:
+                    estimated_duration = round(sec_out - sec_in, 2)
+                else:
+                    estimated_duration = round(max(2.5, min(10.0, word_count / 3.5)), 1)
             else:
                 estimated_duration = float(min(10.0, max(2.5, estimated_duration)))
 
@@ -310,6 +318,106 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
 
         return validated_scenes
 
+    def _parse_flexible_line_script(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Parse linh hoạt kịch bản dạng dòng/bảng với Timecode theo Giây (3247.953 -> 3306.261)
+        hoặc Timecode tiêu chuẩn (00:00:24,441 -> 00:00:37,078).
+        """
+        scenes = []
+        lines = text.strip().splitlines()
+
+        for line in lines:
+            line_str = line.strip()
+            if not line_str or line_str.startswith("---") or ("STT" in line_str and "Voice" in line_str):
+                continue
+
+            parts = [p.strip() for p in line_str.split("|")]
+            if len(parts) >= 3:
+                stt_val = parts[0]
+                try:
+                    scene_id = int(re.sub(r"\D", "", stt_val)) if re.sub(r"\D", "", stt_val) else len(scenes) + 1
+                except Exception:
+                    scene_id = len(scenes) + 1
+
+                voice_text = parts[1]
+                tc_str = parts[2]
+
+                in_tc, out_tc = self._extract_timecodes_from_str(tc_str)
+
+                scenes.append({
+                    "scene_id": scene_id,
+                    "section_type": "BODY",
+                    "in_time": in_tc,
+                    "out_time": out_tc,
+                    "review_text": voice_text,
+                    "visual_suggestion": f"Cảnh B-Roll phân cảnh {scene_id}",
+                })
+            elif "->" in line_str or "➜" in line_str or " - " in line_str:
+                # Dòng không có pipe | nhưng có timecode -> / ➜
+                tc_match = re.search(r"(\d+.*(?:->|➜|-).*)", line_str)
+                if tc_match:
+                    tc_part = tc_match.group(1)
+                    voice_part = line_str.replace(tc_part, "").strip(" |:-")
+                    in_tc, out_tc = self._extract_timecodes_from_str(tc_part)
+                    scenes.append({
+                        "scene_id": len(scenes) + 1,
+                        "section_type": "BODY",
+                        "in_time": in_tc,
+                        "out_time": out_tc,
+                        "review_text": voice_part,
+                        "visual_suggestion": f"Cảnh B-Roll phân cảnh {len(scenes) + 1}",
+                    })
+
+        return scenes
+
+    def _extract_timecodes_from_str(self, tc_str: str) -> tuple[str, str]:
+        """Trích xuất mốc in_time & out_time từ chuỗi dạng Giây (3247.953 -> 3306.261) hoặc HH:MM:SS,mmm."""
+        tc_clean = tc_str.replace(",", ".")
+        # 1. Tìm mốc HH:MM:SS.mmm
+        tc_matches = re.findall(r"\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?", tc_clean)
+        if len(tc_matches) >= 2:
+            return tc_matches[0], tc_matches[1]
+        elif len(tc_matches) == 1:
+            return tc_matches[0], tc_matches[0]
+
+        # 2. Tìm mốc float theo Giây (ví dụ: 3247.953 -> 3306.261)
+        sec_matches = re.findall(r"\b\d+(?:\.\d+)?\b", tc_clean)
+        if len(sec_matches) >= 2:
+            in_sec = float(sec_matches[0])
+            out_sec = float(sec_matches[1])
+            return self._sec_to_tc(in_sec), self._sec_to_tc(out_sec)
+        elif len(sec_matches) == 1:
+            in_sec = float(sec_matches[0])
+            return self._sec_to_tc(in_sec), self._sec_to_tc(in_sec + 5.0)
+
+        return "00:00:00.000", "00:00:05.000"
+
+    def _normalize_timecode_value(self, val: Any) -> str:
+        """Chuẩn hóa giá trị timecode từ float/int (giây) hoặc chuỗi thành HH:MM:SS.mmm."""
+        if val is None or val == "":
+            return "00:00:00.000"
+
+        if isinstance(val, (int, float)):
+            return self._sec_to_tc(float(val))
+
+        val_str = str(val).strip().replace(",", ".")
+        if not val_str:
+            return "00:00:00.000"
+
+        # Nếu là chuỗi số float thuần túy (e.g. "3247.953" hoặc "24.441")
+        if re.match(r"^\d+(?:\.\d+)?$", val_str):
+            try:
+                return self._sec_to_tc(float(val_str))
+            except Exception:
+                pass
+
+        # Nếu là chuỗi timecode (e.g. "00:00:24.441")
+        tc_matches = re.findall(r"\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?", val_str)
+        if tc_matches:
+            return tc_matches[0]
+
+        return "00:00:00.000"
+
     def _parse_markdown_table_script(
         self, markdown_text: str
     ) -> List[Dict[str, Any]]:
@@ -327,13 +435,7 @@ Bạn là một Biên kịch review phim triệu view. Hãy đọc file Phụ đ
                 voice_text = parts[2]
                 tc_str = parts[3]
 
-                tc_matches = re.findall(
-                    r"\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?", tc_str
-                )
-                in_tc = tc_matches[0] if len(tc_matches) > 0 else "00:00:00.000"
-                out_tc = (
-                    tc_matches[1] if len(tc_matches) > 1 else in_tc
-                )
+                in_tc, out_tc = self._extract_timecodes_from_str(tc_str)
 
                 scenes.append(
                     {
