@@ -22,7 +22,7 @@ logger = logging.getLogger("AutoReviewLite.VideoEditorService")
 
 @dataclass
 class SubShot:
-    """Đại diện cho một vết cắt hình ngắn tịnh tiến từ video gốc."""
+    """Đại diện cho một vết cắt hình ngắn B-Roll tịnh tiến từ video gốc cho 1 câu thoại."""
 
     shot_id: int
     source_start_sec: float
@@ -39,7 +39,7 @@ class SubShot:
 
 
 class VideoEditorService:
-    """Engine Audio-Lead B-Roll Chopper (FFmpeg High-Quality Cutting & Subtitle Engine)."""
+    """Engine Audio-Lead B-Roll Chopper (1:1 Match Subtitle Duration & High-Quality Cutting)."""
 
     def __init__(self, fps: float = 30.0):
         self.fps = fps
@@ -229,50 +229,53 @@ class VideoEditorService:
         in_time_str: Any,
         out_time_str: Any,
         voice_duration_sec: float = 5.0,
-        min_shot_len: float = 2.0,
-        max_shot_len: float = 4.5
+        scene_id: int = 1,
+        **kwargs
     ) -> List[SubShot]:
-        """Tự động chia nhỏ mốc in_time -> out_time thành các Sub-Shots tịnh tiến liên tục (Strict Monotonic)."""
+        """
+        THUẬT TOÁN MATCH 1:1: Mỗi 1 câu thoại/dòng kịch bản chỉ tạo ĐÚNG 1 B-Roll Shot tương ứng
+        (Shot Duration = Subtitle Duration). KHÔNG TỰ ĐỘNG CHẺ NHỎ CẢNH THÀNH 2.0s - 4.5s NỮA.
+        """
         start_orig = self._tc_to_sec(in_time_str)
         end_orig = self._tc_to_sec(out_time_str)
 
         if end_orig <= start_orig:
-            end_orig = start_orig + max(3.0, voice_duration_sec)
+            end_orig = start_orig + max(1.0, voice_duration_sec)
 
-        subshots: List[SubShot] = []
-        shot_count = 0
-        current_pos = start_orig
+        dur_sec = round(end_orig - start_orig, 3)
 
-        while current_pos < end_orig:
-            shot_count += 1
-            remaining = end_orig - current_pos
+        return [
+            SubShot(
+                shot_id=scene_id,
+                source_start_sec=round(start_orig, 3),
+                source_end_sec=round(end_orig, 3),
+                duration_sec=dur_sec
+            )
+        ]
 
-            if remaining <= max_shot_len:
-                cur_len = round(remaining, 3)
-            else:
-                cur_len = round(random.uniform(min_shot_len, max_shot_len), 3)
-
-            shot_start = round(current_pos, 3)
-            shot_end = round(shot_start + cur_len, 3)
-
-            subshots.append(SubShot(
-                shot_id=shot_count,
-                source_start_sec=shot_start,
-                source_end_sec=shot_end,
-                duration_sec=cur_len
-            ))
-            current_pos += cur_len
-
-        return subshots
+    def generate_subshots(
+        self,
+        in_time_str: Any,
+        out_time_str: Any,
+        **kwargs
+    ) -> List[SubShot]:
+        """Bảo toàn compatibility phương thức generate_subshots với cơ chế MATCH 1:1."""
+        return self.generate_subshots_for_scene(in_time_str, out_time_str, **kwargs)
 
     def attach_subshots_to_scenes(self, scenes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Gán trước danh sách subshots tịnh tiến liên tục vào từng phân cảnh kịch bản."""
-        for scene in scenes:
+        """Gán ĐÚNG 1 B-Roll Shot 1:1 tương ứng cho mỗi câu thoại/phân cảnh kịch bản."""
+        for idx, scene in enumerate(scenes, start=1):
             in_tc = scene.get("in_time", scene.get("in", ""))
             out_tc = scene.get("out_time", scene.get("out", ""))
             dur_sec = float(scene.get("estimated_duration_sec", 5.0))
+            sc_id = int(scene.get("scene_id", idx))
 
-            subshots = self.generate_subshots_for_scene(in_tc, out_tc, voice_duration_sec=dur_sec)
+            subshots = self.generate_subshots_for_scene(
+                in_time_str=in_tc,
+                out_time_str=out_tc,
+                voice_duration_sec=dur_sec,
+                scene_id=sc_id
+            )
             scene["subshots"] = [s.to_dict() for s in subshots]
         return scenes
 
@@ -285,7 +288,7 @@ class VideoEditorService:
         progress_callback=None,
         **kwargs
     ) -> str:
-        """Ghép các B-Roll sub-shots ra file MP4 HOÀN TOÀN SẠCH SẼ (Chống đơ/treo UI)."""
+        """Ghép các B-Roll sub-shots theo chuẩn Match 1:1 ra file MP4 HOÀN TOÀN SẠCH SẼ."""
         srt_file_path = kwargs.get("srt_file_path", voiceover_path)
         output_mp4_path = kwargs.get("output_mp4_path", output_path)
         target_out_path = output_mp4_path if output_mp4_path else output_path
@@ -295,7 +298,7 @@ class VideoEditorService:
             logger.error(f"File Video gốc không tồn tại: {source_video_path}")
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
 
-        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO. Executable: {self.ffmpeg_bin} | Source: {source_video_path}")
+        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO (MATCH 1:1). Executable: {self.ffmpeg_bin} | Total script lines: {len(scenes)}")
 
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(target_out_path)), "temp_render_shots")
         os.makedirs(temp_dir, exist_ok=True)
@@ -318,7 +321,7 @@ class VideoEditorService:
                     ))
 
             total_shots = len(all_subshots)
-            logger.info(f"Tổng số Shot B-Roll cần băm: {total_shots}")
+            logger.info(f"✅ TỔNG SỐ B-ROLL SHOTS (MATCH 1:1 VỚI KỊCH BẢN): {total_shots}")
 
             with open(concat_list_path, "w", encoding="utf-8") as f_concat:
                 for shot in all_subshots:
@@ -339,7 +342,7 @@ class VideoEditorService:
                         escaped_path = clip_out_path.replace("\\", "/")
                         f_concat.write(f"file '{escaped_path}'\n")
                         clip_paths.append(clip_out_path)
-                        logger.info(f"✅ [Shot #{global_shot_idx}/{total_shots}] Cut thành công trong {t_elapsed:.2f}s")
+                        logger.info(f"✅ [Shot #{global_shot_idx}/{total_shots}] High-Quality Cut thành công trong {t_elapsed:.2f}s")
                     else:
                         logger.warning(f"⚠️ Shot #{global_shot_idx} cắt lỗi hoặc timeout, bỏ qua.")
 
