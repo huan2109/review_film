@@ -6,9 +6,10 @@ import logging
 import subprocess
 import shutil
 from pathlib import Path
-from dataclasses import dataclass
-from typing import List, Dict, Any
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Any, Tuple
 
+# Sửa lỗi try-except và khởi tạo biến HAS_IMAGEIO_FFMPEG đúng cách
 try:
     import imageio_ffmpeg
     HAS_IMAGEIO_FFMPEG = True
@@ -20,73 +21,134 @@ logger = logging.getLogger("AutoReviewLite.VideoEditorService")
 
 @dataclass
 class SubShot:
-    """Đại diện cho một vết cắt hình ngắn (2.0s - 4.5s) tịnh tiến từ video gốc."""
+    """Đại diện cho một vết cắt hình ngắn (2.0s - 4.5s) tịnh tiến từ video gốc cho 1 câu thoại."""
+    shot_id: int
     source_start_sec: float
     source_end_sec: float
     duration_sec: float
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "shot_id": self.shot_id,
+            "start": self.source_start_sec,
+            "end": self.source_end_sec,
+            "duration": self.duration_sec,
+        }
+
 
 class VideoEditorService:
-    """Engine Audio-Lead B-Roll Chopper (FFmpeg Safe Cut, -nostdin, timeout=20 & Clean Concat)."""
+    """Engine Audio-Lead B-Roll Chopper (FFmpeg Safe Cut, -nostdin, timeout=15 & Clean Concat)."""
 
     def __init__(self, fps: float = 30.0):
         self.fps = fps
+        self.ffmpeg_bin = self.get_ffmpeg_exe_path()
+
+    @classmethod
+    def get_ffmpeg_exe_path(cls) -> str:
+        """Kiểm tra và lấy đường dẫn thực thi của FFmpeg."""
+        # 1. Thử lấy từ imageio_ffmpeg
+        if HAS_IMAGEIO_FFMPEG:
+            try:
+                exe_path = imageio_ffmpeg.get_ffmpeg_exe()
+                if exe_path and os.path.exists(exe_path):
+                    return os.path.abspath(exe_path)
+            except Exception:
+                pass
+
+        # 2. Dự phòng: Tìm FFmpeg cài sẵn trong PATH của hệ thống
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg:
+            return system_ffmpeg
+
+        # 3. Thử tìm các vị trí thông dụng trên hệ thống Windows
+        common_locations = [
+            os.path.join(os.getcwd(), "ffmpeg.exe"),
+            os.path.join(os.getcwd(), "bin", "ffmpeg.exe"),
+            "C:\\ffmpeg\\bin\\ffmpeg.exe",
+            "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+            "C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe"
+        ]
+        for loc in common_locations:
+            if os.path.exists(loc):
+                return os.path.abspath(loc)
+
+        # 4. Trả về tên lệnh mặc định
+        return "ffmpeg"
 
     def _tc_to_sec(self, tc_str: Any) -> float:
-        """Quy đổi Timecode (chuỗi HH:MM:SS.mmm hoặc số float/int) sang Giây."""
+        """Quy đổi Timecode (chuỗi HH:MM:SS.mmm, MM:SS hoặc số float/int) sang Giây."""
         if isinstance(tc_str, (int, float)):
             return float(tc_str)
         if not tc_str or not isinstance(tc_str, str):
             return 0.0
 
-        tc_str = tc_str.strip().replace(',', '.')
-        if '->' in tc_str:
-            tc_str = tc_str.split('->')[0].strip()
+        tc_clean = tc_str.strip().replace(',', '.')
+        if '->' in tc_clean:
+            tc_clean = tc_clean.split('->')[0].strip()
+        if '➜' in tc_clean:
+            tc_clean = tc_clean.split('➜')[0].strip()
 
-        parts = tc_str.split(':')
+        parts = tc_clean.split(':')
         try:
             if len(parts) == 3:
                 return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
             elif len(parts) == 2:
                 return float(parts[0]) * 60 + float(parts[1])
             else:
-                return float(tc_str)
+                return float(tc_clean)
         except ValueError:
             return 0.0
 
-    def generate_subshots(self, in_time_str: Any, out_time_str: Any, min_shot_len: float = 2.0, max_shot_len: float = 4.5) -> List[SubShot]:
-        """Tự động chia nhỏ mốc timecode thành các Sub-Shots tịnh tiến liên tục."""
+    def generate_subshots_for_scene(
+        self,
+        in_time_str: Any,
+        out_time_str: Any,
+        voice_duration_sec: float = 5.0,
+        min_shot_len: float = 2.0,
+        max_shot_len: float = 4.5
+    ) -> List[SubShot]:
+        """Tự động chia nhỏ mốc in_time -> out_time thành các Sub-Shots tịnh tiến liên tục (Strict Monotonic)."""
         start_orig = self._tc_to_sec(in_time_str)
         end_orig = self._tc_to_sec(out_time_str)
 
         if end_orig <= start_orig:
-            end_orig = start_orig + 3.0
+            end_orig = start_orig + max(3.0, voice_duration_sec)
 
-        subshots = []
-        curr_pos = start_orig
+        subshots: List[SubShot] = []
+        shot_count = 0
+        current_pos = start_orig
 
-        while curr_pos < end_orig:
-            rem = end_orig - curr_pos
-            if rem <= max_shot_len:
-                shot_len = rem
+        while current_pos < end_orig:
+            shot_count += 1
+            remaining = end_orig - current_pos
+
+            if remaining <= max_shot_len:
+                cur_len = round(remaining, 3)
             else:
-                shot_len = random.uniform(min_shot_len, max_shot_len)
+                cur_len = round(random.uniform(min_shot_len, max_shot_len), 3)
+
+            shot_start = round(current_pos, 3)
+            shot_end = round(shot_start + cur_len, 3)
 
             subshots.append(SubShot(
-                source_start_sec=round(curr_pos, 3),
-                source_end_sec=round(curr_pos + shot_len, 3),
-                duration_sec=round(shot_len, 3)
+                shot_id=shot_count,
+                source_start_sec=shot_start,
+                source_end_sec=shot_end,
+                duration_sec=cur_len
             ))
-            curr_pos += shot_len
+            current_pos += cur_len
 
         return subshots
 
     def attach_subshots_to_scenes(self, scenes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Gán danh sách subshots tịnh tiến liên tục vào từng phân cảnh kịch bản."""
+        """Gán trước danh sách subshots tịnh tiến liên tục vào từng phân cảnh kịch bản."""
         for scene in scenes:
             in_tc = scene.get("in_time", scene.get("in", ""))
             out_tc = scene.get("out_time", scene.get("out", ""))
-            scene["subshots"] = self.generate_subshots(in_tc, out_tc)
+            dur_sec = float(scene.get("estimated_duration_sec", 5.0))
+
+            subshots = self.generate_subshots_for_scene(in_tc, out_tc, voice_duration_sec=dur_sec)
+            scene["subshots"] = [s.to_dict() for s in subshots]
         return scenes
 
     def render_full_review_video(
@@ -105,29 +167,34 @@ class VideoEditorService:
         voice_path = voiceover_path if voiceover_path else srt_file_path
 
         if not source_video_path or not os.path.exists(source_video_path):
+            logger.error(f"File Video gốc không tồn tại: {source_video_path}")
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
 
-        ffmpeg_executable = "ffmpeg"
-        if HAS_IMAGEIO_FFMPEG:
-            try:
-                ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
-            except Exception:
-                ffmpeg_executable = "ffmpeg"
+        ffmpeg_executable = self.ffmpeg_bin or self.get_ffmpeg_exe_path()
+        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO. Executable: {ffmpeg_executable} | Source: {source_video_path}")
 
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(target_out_path)), "temp_render_shots")
         os.makedirs(temp_dir, exist_ok=True)
 
         try:
+            concat_list_path = os.path.join(temp_dir, "concat_list.txt")
+            clip_paths = []
+            global_shot_idx = 0
+
             scenes = self.attach_subshots_to_scenes(scenes)
             all_subshots = []
             for sc in scenes:
-                all_subshots.extend(sc.get("subshots", []))
+                sub_dicts = sc.get("subshots", [])
+                for sdict in sub_dicts:
+                    all_subshots.append(SubShot(
+                        shot_id=sdict.get("shot_id", 1),
+                        source_start_sec=sdict.get("start", 0.0),
+                        source_end_sec=sdict.get("end", 5.0),
+                        duration_sec=sdict.get("duration", 5.0)
+                    ))
 
             total_shots = len(all_subshots)
             logger.info(f"Tổng số Shot B-Roll cần băm: {total_shots}")
-
-            concat_list_path = os.path.join(temp_dir, "concat_list.txt")
-            global_shot_idx = 0
 
             with open(concat_list_path, "w", encoding="utf-8") as f_concat:
                 for shot in all_subshots:
@@ -139,8 +206,8 @@ class VideoEditorService:
                         "-nostdin",
                         "-threads", "2",
                         "-loglevel", "error",
-                        "-ss", str(shot.source_start_sec),
                         "-i", str(source_video_path),
+                        "-ss", str(shot.source_start_sec),
                         "-t", str(shot.duration_sec),
                         "-c:v", "libx264",
                         "-preset", "ultrafast",
@@ -149,15 +216,24 @@ class VideoEditorService:
                         str(clip_out_path)
                     ]
 
+                    t_start = time.time()
                     try:
-                        res = subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=20)
+                        res = subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15)
+                        t_elapsed = time.time() - t_start
+
                         if res.returncode == 0 and os.path.exists(clip_out_path) and os.path.getsize(clip_out_path) > 0:
                             escaped_path = clip_out_path.replace("\\", "/")
                             f_concat.write(f"file '{escaped_path}'\n")
+                            clip_paths.append(clip_out_path)
+                            logger.info(f"✅ [Shot #{global_shot_idx}/{total_shots}] Cut thành công trong {t_elapsed:.2f}s")
                         else:
-                            logger.warning(f"Shot {global_shot_idx} cắt lỗi, bỏ qua.")
+                            logger.warning(f"⚠️ Shot #{global_shot_idx} cắt lỗi (code {res.returncode}), bỏ qua.")
                     except subprocess.TimeoutExpired:
-                        logger.warning(f"Shot {global_shot_idx} bị timeout (20s), bỏ qua.")
+                        logger.warning(f"⚠️ Shot #{global_shot_idx} bị timeout (15s), tự động bỏ qua.")
+                        continue
+                    except Exception as e:
+                        logger.error(f"⚠️ Shot #{global_shot_idx} gặp ngoại lệ {e}, bỏ qua.")
+                        continue
 
                     if progress_callback:
                         msg_str = f"🎬 Đang băm B-Roll Shot {global_shot_idx}/{total_shots}..."
@@ -169,18 +245,26 @@ class VideoEditorService:
                             except Exception:
                                 pass
 
+            if not clip_paths:
+                raise RuntimeError("Không cắt được clip B-Roll hợp lệ nào từ video gốc!")
+
             # Tiến hành ghép nối (Concat)
             temp_video_only = os.path.join(temp_dir, "temp_concat_video.mp4")
             cmd_concat = [
                 ffmpeg_executable, "-y", "-nostdin",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_list_path,
-                "-c", "copy",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "23",
+                "-an", "-sn", "-dn",
                 temp_video_only
             ]
-            subprocess.run(cmd_concat, check=True)
+            res_concat = subprocess.run(cmd_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+            if res_concat.returncode != 0:
+                raise RuntimeError(f"FFmpeg Clean Concat Error: {res_concat.stderr}")
 
-            # Ghép audio voiceover nếu có
+            # Ghép audio voiceover nếu có file audio phù hợp
             if voice_path and os.path.exists(voice_path) and voice_path.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')):
                 cmd_final = [
                     ffmpeg_executable, "-y", "-nostdin",
@@ -195,6 +279,7 @@ class VideoEditorService:
             else:
                 shutil.copy(temp_video_only, target_out_path)
 
+            logger.info(f"🎉 RENDER HOÀN TẤT VÀ XUẤT FILE THÀNH CÔNG -> {target_out_path}")
             return target_out_path
 
         finally:
