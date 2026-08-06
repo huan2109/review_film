@@ -39,11 +39,14 @@ class SubShot:
 
 
 class VideoEditorService:
-    """Engine Audio-Lead B-Roll Chopper (1:1 Match Subtitle Duration & High-Quality Cutting)."""
+    """
+    Engine Audio-Lead B-Roll Chopper (1:1 Match Subtitle Duration & NVIDIA GPU NVENC Hardware Acceleration).
+    """
 
     def __init__(self, fps: float = 30.0):
         self.fps = fps
         self.ffmpeg_bin = self.get_ffmpeg_exe_path()
+        self.has_nvidia_gpu = self._check_nvidia_gpu()
 
     @classmethod
     def get_ffmpeg_exe_path(cls) -> str:
@@ -76,6 +79,35 @@ class VideoEditorService:
 
         # 4. Trả về tên lệnh mặc định
         return "ffmpeg"
+
+    def _check_nvidia_gpu(self) -> bool:
+        """Kiểm tra hệ thống có hỗ trợ NVIDIA GPU Hardware Acceleration (NVENC) không."""
+        try:
+            cmd = [
+                self.ffmpeg_bin,
+                "-y",
+                "-nostdin",
+                "-f", "lavfi",
+                "-i", "color=c=black:s=256x256:d=0.1",
+                "-c:v", "h264_nvenc",
+                "-f", "null",
+                "-"
+            ]
+            res = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5
+            )
+            if res.returncode == 0:
+                logger.info("🚀 TỰ ĐỘNG BẬT TĂNG TỐC PHẦN CỨNG NVIDIA GPU (h264_nvenc)! Render siêu tốc.")
+                return True
+        except Exception:
+            pass
+
+        logger.info("ℹ️ Không tìm thấy NVIDIA GPU NVENC khả dụng, tự động chuyển sang mã hóa CPU (libx264).")
+        return False
 
     def _tc_to_sec(self, tc_str: Any) -> float:
         """Quy đổi Timecode (chuỗi HH:MM:SS.mmm/MM:SS hoặc float/int) sang Giây."""
@@ -141,30 +173,36 @@ class VideoEditorService:
         duration_sec: float,
         timeout: int = 20,
     ) -> bool:
-        """Cắt phân đoạn video đạt CHẤT LƯỢNG CAO NHẤT (Frame-Accurate & Visually Lossless)."""
-        cmd = [
-            self.ffmpeg_bin,
-            "-y",  # Ghi đè file nếu đã tồn tại
-            "-nostdin",  # Tránh treo tiến trình ngầm
-            "-i",
-            str(input_path),
-            "-ss",
-            f"{start_sec:.3f}",  # Đặt -ss sau -i để cắt chính xác frame
-            "-t",
-            f"{duration_sec:.3f}",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "slow",  # Render kỹ để giữ tối đa chi tiết
-            "-crf",
-            "17",  # Mức 17 = Chất lượng gần như lossless
-            "-pix_fmt",
-            "yuv420p",  # Tương thích chuẩn màu sắc mọi thiết bị
-            "-an",  # Tắt âm thanh video gốc cho B-Roll
-            "-sn",
-            "-dn",
-            str(output_path),
-        ]
+        """Cắt phân đoạn video B-Roll (Tùy chọn NVIDIA NVENC GPU / CPU Fallback)."""
+        # Build command dựa trên GPU NVIDIA khả dụng
+        cmd = [self.ffmpeg_bin, "-y", "-nostdin"]
+
+        if self.has_nvidia_gpu:
+            cmd.extend(["-hwaccel", "cuda"])
+
+        cmd.extend([
+            "-i", str(input_path),
+            "-ss", f"{start_sec:.3f}",
+            "-t", f"{duration_sec:.3f}"
+        ])
+
+        if self.has_nvidia_gpu:
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",
+                "-rc", "vbr",
+                "-cq", "19",
+                "-pix_fmt", "yuv420p"
+            ])
+        else:
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p"
+            ])
+
+        cmd.extend(["-an", "-sn", "-dn", str(output_path)])
 
         try:
             result = subprocess.run(
@@ -174,10 +212,39 @@ class VideoEditorService:
                 stderr=subprocess.PIPE,
                 timeout=timeout
             )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, Exception) as e:
-            logger.error(f"Lỗi khi cắt video: {e}")
-            return False
+            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True
+        except Exception as e:
+            logger.warning(f"Thử cắt GPU bị lỗi ({e}), chuyển sang fallback CPU...")
+
+        # Fallback về CPU nếu GPU cut bị từ chối/lỗi
+        if self.has_nvidia_gpu:
+            cmd_cpu = [
+                self.ffmpeg_bin, "-y", "-nostdin",
+                "-i", str(input_path),
+                "-ss", f"{start_sec:.3f}",
+                "-t", f"{duration_sec:.3f}",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-an", "-sn", "-dn",
+                str(output_path)
+            ]
+            try:
+                res_cpu = subprocess.run(
+                    cmd_cpu,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout
+                )
+                return res_cpu.returncode == 0
+            except Exception as e:
+                logger.error(f"Lỗi khi cắt video (CPU Fallback): {e}")
+                return False
+
+        return False
 
     def export_video_with_subtitles(
         self,
@@ -186,30 +253,35 @@ class VideoEditorService:
         output_video: str,
         timeout: int = 120,
     ) -> bool:
-        """Xuất video kèm phụ đề với chất lượng cao và chống treo tác vụ."""
+        """Xuất video kèm phụ đề (Hỗ trợ GPU NVENC / CPU Fallback)."""
         clean_srt_path = str(Path(srt_file).resolve()).replace("\\", "/")
         clean_srt_path = clean_srt_path.replace(":", "\\:")
 
         cmd = [
-            self.ffmpeg_bin,
-            "-y",  # Tự động ghi đè
-            "-nostdin",  # Tắt stdin chống treo
-            "-i",
-            str(input_video),
-            "-vf",
-            f"subtitles='{clean_srt_path}'",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "slow",
-            "-crf",
-            "17",  # Chất lượng cao
-            "-c:a",
-            "aac",
-            "-b:a",
-            "320k",
-            str(output_video),
+            self.ffmpeg_bin, "-y", "-nostdin",
+            "-i", str(input_video),
+            "-vf", f"subtitles='{clean_srt_path}'"
         ]
+
+        if self.has_nvidia_gpu:
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", "p6",
+                "-rc", "vbr",
+                "-cq", "18",
+                "-c:a", "aac",
+                "-b:a", "320k",
+                str(output_video)
+            ])
+        else:
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",
+                "-c:a", "aac",
+                "-b:a", "320k",
+                str(output_video)
+            ])
 
         try:
             process = subprocess.run(
@@ -219,10 +291,37 @@ class VideoEditorService:
                 stderr=subprocess.PIPE,
                 timeout=timeout,
             )
-            return process.returncode == 0
+            if process.returncode == 0:
+                return True
         except Exception as e:
-            logger.error(f"Lỗi khi xuất video: {e}")
-            return False
+            logger.warning(f"Lỗi xuất video GPU ({e}), chuyển sang fallback CPU...")
+
+        if self.has_nvidia_gpu:
+            cmd_cpu = [
+                self.ffmpeg_bin, "-y", "-nostdin",
+                "-i", str(input_video),
+                "-vf", f"subtitles='{clean_srt_path}'",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",
+                "-c:a", "aac",
+                "-b:a", "320k",
+                str(output_video)
+            ]
+            try:
+                proc_cpu = subprocess.run(
+                    cmd_cpu,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                )
+                return proc_cpu.returncode == 0
+            except Exception as e:
+                logger.error(f"Lỗi xuất video phụ đề CPU: {e}")
+                return False
+
+        return False
 
     def generate_subshots_for_scene(
         self,
@@ -288,7 +387,7 @@ class VideoEditorService:
         progress_callback=None,
         **kwargs
     ) -> str:
-        """Ghép các B-Roll sub-shots theo chuẩn Match 1:1 ra file MP4 HOÀN TOÀN SẠCH SẼ."""
+        """Ghép các B-Roll sub-shots theo chuẩn Match 1:1 ra file MP4 (Tăng Tốc NVIDIA NVENC GPU)."""
         srt_file_path = kwargs.get("srt_file_path", voiceover_path)
         output_mp4_path = kwargs.get("output_mp4_path", output_path)
         target_out_path = output_mp4_path if output_mp4_path else output_path
@@ -298,7 +397,8 @@ class VideoEditorService:
             logger.error(f"File Video gốc không tồn tại: {source_video_path}")
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
 
-        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO (MATCH 1:1). Executable: {self.ffmpeg_bin} | Total script lines: {len(scenes)}")
+        mode_str = "NVIDIA GPU NVENC" if self.has_nvidia_gpu else "CPU libx264"
+        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO ({mode_str}). Executable: {self.ffmpeg_bin} | Script lines: {len(scenes)}")
 
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(target_out_path)), "temp_render_shots")
         os.makedirs(temp_dir, exist_ok=True)
@@ -342,12 +442,12 @@ class VideoEditorService:
                         escaped_path = clip_out_path.replace("\\", "/")
                         f_concat.write(f"file '{escaped_path}'\n")
                         clip_paths.append(clip_out_path)
-                        logger.info(f"✅ [Shot #{global_shot_idx}/{total_shots}] High-Quality Cut thành công trong {t_elapsed:.2f}s")
+                        logger.info(f"✅ [{mode_str}] [Shot #{global_shot_idx}/{total_shots}] Cut thành công trong {t_elapsed:.2f}s")
                     else:
                         logger.warning(f"⚠️ Shot #{global_shot_idx} cắt lỗi hoặc timeout, bỏ qua.")
 
                     if progress_callback:
-                        msg_str = f"🎬 Đang băm B-Roll Shot {global_shot_idx}/{total_shots}..."
+                        msg_str = f"🎬 Đang băm B-Roll Shot {global_shot_idx}/{total_shots} ({mode_str})..."
                         try:
                             progress_callback(msg_str)
                         except TypeError:
@@ -361,17 +461,32 @@ class VideoEditorService:
 
             # Tiến hành ghép nối (Concat)
             temp_video_only = os.path.join(temp_dir, "temp_concat_video.mp4")
-            cmd_concat = [
-                self.ffmpeg_bin, "-y", "-nostdin",
-                "-f", "concat", "-safe", "0",
-                "-i", concat_list_path,
-                "-c:v", "libx264",
-                "-preset", "slow",
-                "-crf", "17",
-                "-pix_fmt", "yuv420p",
-                "-an", "-sn", "-dn",
-                temp_video_only
-            ]
+            cmd_concat = [self.ffmpeg_bin, "-y", "-nostdin"]
+
+            if self.has_nvidia_gpu:
+                cmd_concat.extend([
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_list_path,
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p6",
+                    "-rc", "vbr",
+                    "-cq", "18",
+                    "-pix_fmt", "yuv420p",
+                    "-an", "-sn", "-dn",
+                    temp_video_only
+                ])
+            else:
+                cmd_concat.extend([
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_list_path,
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "18",
+                    "-pix_fmt", "yuv420p",
+                    "-an", "-sn", "-dn",
+                    temp_video_only
+                ])
+
             res_concat = subprocess.run(
                 cmd_concat,
                 stdin=subprocess.DEVNULL,
@@ -381,7 +496,28 @@ class VideoEditorService:
                 timeout=300
             )
             if res_concat.returncode != 0:
-                raise RuntimeError(f"FFmpeg Clean Concat Error: {res_concat.stderr}")
+                logger.warning(f"Lỗi Concat GPU ({res_concat.stderr}), thử fallback CPU...")
+                cmd_concat_cpu = [
+                    self.ffmpeg_bin, "-y", "-nostdin",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_list_path,
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "18",
+                    "-pix_fmt", "yuv420p",
+                    "-an", "-sn", "-dn",
+                    temp_video_only
+                ]
+                res_concat_cpu = subprocess.run(
+                    cmd_concat_cpu,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=300
+                )
+                if res_concat_cpu.returncode != 0:
+                    raise RuntimeError(f"FFmpeg Clean Concat Error: {res_concat_cpu.stderr}")
 
             # Ghép audio voiceover nếu có file audio phù hợp
             if voice_path and os.path.exists(voice_path) and voice_path.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')):
