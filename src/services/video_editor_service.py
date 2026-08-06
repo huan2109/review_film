@@ -77,37 +77,6 @@ class VideoEditorService:
         # 4. Trả về tên lệnh mặc định
         return "ffmpeg"
 
-    def create_srt_subtitle_file(
-        self, subtitles: List[Dict[str, Any]], output_srt_path: str
-    ) -> bool:
-        """Tạo file phụ đề SRT an toàn mã hóa UTF-8 (Chống đứng/treo I/O file)."""
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(output_srt_path)), exist_ok=True)
-            with open(output_srt_path, "w", encoding="utf-8") as f:
-                for idx, sub in enumerate(subtitles, 1):
-                    start_sec = self._tc_to_sec(sub.get("start", sub.get("in_time", 0.0)))
-                    end_sec = self._tc_to_sec(sub.get("end", sub.get("out_time", 0.0)))
-                    start_str = self._sec_to_srt_timecode(start_sec)
-                    end_str = self._sec_to_srt_timecode(end_sec)
-                    text = str(sub.get("text", sub.get("review_text", ""))).strip()
-
-                    f.write(f"{idx}\n")
-                    f.write(f"{start_str} --> {end_str}\n")
-                    f.write(f"{text}\n\n")
-            return True
-        except Exception as e:
-            logger.error(f"Lỗi khi tạo file phụ đề: {e}")
-            return False
-
-    def _sec_to_srt_timecode(self, seconds: float) -> str:
-        """Quy đổi số giây sang định dạng SRT Timecode (HH:MM:SS,mmm)."""
-        millisec = int((seconds % 1) * 1000)
-        total_sec = int(seconds)
-        sec = total_sec % 60
-        min_val = (total_sec // 60) % 60
-        hrs = total_sec // 3600
-        return f"{hrs:02d}:{min_val:02d}:{sec:02d},{millisec:03d}"
-
     def _tc_to_sec(self, tc_str: Any) -> float:
         """Quy đổi Timecode (chuỗi HH:MM:SS.mmm/MM:SS hoặc float/int) sang Giây."""
         if isinstance(tc_str, (int, float)):
@@ -132,6 +101,37 @@ class VideoEditorService:
             return float(tc_clean)
         except ValueError:
             return 0.0
+
+    def _sec_to_srt_timecode(self, seconds: float) -> str:
+        """Quy đổi số giây sang định dạng SRT Timecode (HH:MM:SS,mmm)."""
+        millisec = int((seconds % 1) * 1000)
+        total_sec = int(seconds)
+        sec = total_sec % 60
+        min_val = (total_sec // 60) % 60
+        hrs = total_sec // 3600
+        return f"{hrs:02d}:{min_val:02d}:{sec:02d},{millisec:03d}"
+
+    def create_srt_subtitle_file(
+        self, subtitles: List[Dict[str, Any]], output_srt_path: str
+    ) -> bool:
+        """Tạo file phụ đề SRT an toàn mã hóa UTF-8."""
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output_srt_path)), exist_ok=True)
+            with open(output_srt_path, "w", encoding="utf-8") as f:
+                for idx, sub in enumerate(subtitles, 1):
+                    start_sec = self._tc_to_sec(sub.get("start", sub.get("in_time", 0.0)))
+                    end_sec = self._tc_to_sec(sub.get("end", sub.get("out_time", 0.0)))
+                    start_str = self._sec_to_srt_timecode(start_sec)
+                    end_str = self._sec_to_srt_timecode(end_sec)
+                    text = str(sub.get("text", sub.get("review_text", ""))).strip()
+
+                    f.write(f"{idx}\n")
+                    f.write(f"{start_str} --> {end_str}\n")
+                    f.write(f"{text}\n\n")
+            return True
+        except Exception as e:
+            logger.error(f"Lỗi khi tạo file phụ đề: {e}")
+            return False
 
     def cut_subshot_high_quality(
         self,
@@ -184,16 +184,16 @@ class VideoEditorService:
         input_video: str,
         srt_file: str,
         output_video: str,
-        timeout: int = 60,
+        timeout: int = 120,
     ) -> bool:
-        """Ghép phụ đề và xuất video - CÓ CƠ CHẾ CHỐNG TREO/ĐỨNG TÁC VỤ."""
+        """Xuất video kèm phụ đề với chất lượng cao và chống treo tác vụ."""
         clean_srt_path = str(Path(srt_file).resolve()).replace("\\", "/")
         clean_srt_path = clean_srt_path.replace(":", "\\:")
 
         cmd = [
             self.ffmpeg_bin,
-            "-y",  # Tự động ghi đè, không đợi hỏi keyboard
-            "-nostdin",  # TẮT STDIN: Chống đứng tác vụ 100%
+            "-y",  # Tự động ghi đè
+            "-nostdin",  # Tắt stdin chống treo
             "-i",
             str(input_video),
             "-vf",
@@ -201,11 +201,13 @@ class VideoEditorService:
             "-c:v",
             "libx264",
             "-preset",
-            "fast",
+            "slow",
             "-crf",
-            "18",
+            "17",  # Chất lượng cao
             "-c:a",
-            "copy",
+            "aac",
+            "-b:a",
+            "320k",
             str(output_video),
         ]
 
@@ -218,11 +220,8 @@ class VideoEditorService:
                 timeout=timeout,
             )
             return process.returncode == 0
-        except subprocess.TimeoutExpired:
-            logger.error(f"Lỗi: Quá thời gian xử lý ({timeout}s).")
-            return False
         except Exception as e:
-            logger.error(f"Lỗi xuất video phụ đề: {e}")
+            logger.error(f"Lỗi khi xuất video: {e}")
             return False
 
     def generate_subshots_for_scene(
