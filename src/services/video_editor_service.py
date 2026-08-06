@@ -9,7 +9,6 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Tuple
 
-# Sửa lỗi try-except và khởi tạo biến HAS_IMAGEIO_FFMPEG đúng cách
 try:
     import imageio_ffmpeg
     HAS_IMAGEIO_FFMPEG = True
@@ -37,7 +36,7 @@ class SubShot:
 
 
 class VideoEditorService:
-    """Engine Audio-Lead B-Roll Chopper (FFmpeg Safe Cut, -nostdin, timeout=15 & Clean Concat)."""
+    """Engine Audio-Lead B-Roll Chopper (FFmpeg High-Quality Cutting & Concat Engine)."""
 
     def __init__(self, fps: float = 30.0):
         self.fps = fps
@@ -45,8 +44,7 @@ class VideoEditorService:
 
     @classmethod
     def get_ffmpeg_exe_path(cls) -> str:
-        """Kiểm tra và lấy đường dẫn thực thi của FFmpeg."""
-        # 1. Thử lấy từ imageio_ffmpeg
+        """Lấy đường dẫn tệp thực thi FFmpeg."""
         if HAS_IMAGEIO_FFMPEG:
             try:
                 exe_path = imageio_ffmpeg.get_ffmpeg_exe()
@@ -55,12 +53,10 @@ class VideoEditorService:
             except Exception:
                 pass
 
-        # 2. Dự phòng: Tìm FFmpeg cài sẵn trong PATH của hệ thống
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
             return system_ffmpeg
 
-        # 3. Thử tìm các vị trí thông dụng trên hệ thống Windows
         common_locations = [
             os.path.join(os.getcwd(), "ffmpeg.exe"),
             os.path.join(os.getcwd(), "bin", "ffmpeg.exe"),
@@ -72,11 +68,10 @@ class VideoEditorService:
             if os.path.exists(loc):
                 return os.path.abspath(loc)
 
-        # 4. Trả về tên lệnh mặc định
         return "ffmpeg"
 
     def _tc_to_sec(self, tc_str: Any) -> float:
-        """Quy đổi Timecode (chuỗi HH:MM:SS.mmm, MM:SS hoặc số float/int) sang Giây."""
+        """Quy đổi Timecode (chuỗi HH:MM:SS.mmm hoặc float/int) sang Giây."""
         if isinstance(tc_str, (int, float)):
             return float(tc_str)
         if not tc_str or not isinstance(tc_str, str):
@@ -88,16 +83,61 @@ class VideoEditorService:
         if '➜' in tc_clean:
             tc_clean = tc_clean.split('➜')[0].strip()
 
-        parts = tc_clean.split(':')
         try:
+            parts = tc_clean.split(":")
             if len(parts) == 3:
-                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                h, m, s = parts
+                return float(h) * 3600 + float(m) * 60 + float(s)
             elif len(parts) == 2:
-                return float(parts[0]) * 60 + float(parts[1])
-            else:
-                return float(tc_clean)
+                m, s = parts
+                return float(m) * 60 + float(s)
+            return float(tc_clean)
         except ValueError:
             return 0.0
+
+    def cut_subshot_high_quality(
+        self,
+        input_path: str,
+        output_path: str,
+        start_sec: float,
+        duration_sec: float,
+        timeout: int = 20,
+    ) -> bool:
+        """Cắt phân đoạn video đạt CHẤT LƯỢNG CAO NHẤT (Frame-Accurate & Visually Lossless)."""
+        cmd = [
+            self.ffmpeg_bin,
+            "-y",  # Ghi đè file nếu đã tồn tại
+            "-nostdin",  # Tránh treo tiến trình ngầm
+            "-i",
+            str(input_path),
+            "-ss",
+            f"{start_sec:.3f}",  # Đặt -ss sau -i để cắt chính xác frame
+            "-t",
+            f"{duration_sec:.3f}",
+            # --- Cấu hình Chất Lượng Video ---
+            "-c:v",
+            "libx264",
+            "-preset",
+            "slow",  # Render kỹ để giữ tối đa chi tiết
+            "-crf",
+            "17",  # Mức 17 = Chất lượng gần như lossless
+            "-pix_fmt",
+            "yuv420p",  # Tương thích chuẩn màu sắc mọi thiết bị
+            # --- Cấu hình Âm thanh ---
+            "-an",  # Tắt âm thanh video gốc cho B-Roll
+            "-sn",
+            "-dn",
+            str(output_path),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, Exception) as e:
+            logger.error(f"Lỗi khi cắt video: {e}")
+            return False
 
     def generate_subshots_for_scene(
         self,
@@ -160,7 +200,7 @@ class VideoEditorService:
         progress_callback=None,
         **kwargs
     ) -> str:
-        """Ghép các B-Roll sub-shots ra file MP4 HOÀN TOÀN SẠCH SẼ (Chống đơ/treo UI)."""
+        """Ghép các B-Roll sub-shots ra file MP4 CHẤT LƯỢNG CAO NHẤT (Chống đơ/treo UI)."""
         srt_file_path = kwargs.get("srt_file_path", voiceover_path)
         output_mp4_path = kwargs.get("output_mp4_path", output_path)
         target_out_path = output_mp4_path if output_mp4_path else output_path
@@ -170,8 +210,7 @@ class VideoEditorService:
             logger.error(f"File Video gốc không tồn tại: {source_video_path}")
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
 
-        ffmpeg_executable = self.ffmpeg_bin or self.get_ffmpeg_exe_path()
-        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO. Executable: {ffmpeg_executable} | Source: {source_video_path}")
+        logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO HIGH QUALITY. Executable: {self.ffmpeg_bin} | Source: {source_video_path}")
 
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(target_out_path)), "temp_render_shots")
         os.makedirs(temp_dir, exist_ok=True)
@@ -201,42 +240,26 @@ class VideoEditorService:
                     global_shot_idx += 1
                     clip_out_path = os.path.join(temp_dir, f"shot_{global_shot_idx:04d}.mp4")
 
-                    cmd_cut = [
-                        ffmpeg_executable, "-y",
-                        "-nostdin",
-                        "-threads", "2",
-                        "-loglevel", "error",
-                        "-i", str(source_video_path),
-                        "-ss", str(shot.source_start_sec),
-                        "-t", str(shot.duration_sec),
-                        "-c:v", "libx264",
-                        "-preset", "ultrafast",
-                        "-crf", "23",
-                        "-an", "-sn", "-dn",
-                        str(clip_out_path)
-                    ]
-
                     t_start = time.time()
-                    try:
-                        res = subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15)
-                        t_elapsed = time.time() - t_start
+                    success = self.cut_subshot_high_quality(
+                        input_path=source_video_path,
+                        output_path=clip_out_path,
+                        start_sec=shot.source_start_sec,
+                        duration_sec=shot.duration_sec,
+                        timeout=20
+                    )
+                    t_elapsed = time.time() - t_start
 
-                        if res.returncode == 0 and os.path.exists(clip_out_path) and os.path.getsize(clip_out_path) > 0:
-                            escaped_path = clip_out_path.replace("\\", "/")
-                            f_concat.write(f"file '{escaped_path}'\n")
-                            clip_paths.append(clip_out_path)
-                            logger.info(f"✅ [Shot #{global_shot_idx}/{total_shots}] Cut thành công trong {t_elapsed:.2f}s")
-                        else:
-                            logger.warning(f"⚠️ Shot #{global_shot_idx} cắt lỗi (code {res.returncode}), bỏ qua.")
-                    except subprocess.TimeoutExpired:
-                        logger.warning(f"⚠️ Shot #{global_shot_idx} bị timeout (15s), tự động bỏ qua.")
-                        continue
-                    except Exception as e:
-                        logger.error(f"⚠️ Shot #{global_shot_idx} gặp ngoại lệ {e}, bỏ qua.")
-                        continue
+                    if success and os.path.exists(clip_out_path) and os.path.getsize(clip_out_path) > 0:
+                        escaped_path = clip_out_path.replace("\\", "/")
+                        f_concat.write(f"file '{escaped_path}'\n")
+                        clip_paths.append(clip_out_path)
+                        logger.info(f"✅ [Shot #{global_shot_idx}/{total_shots}] High-Quality Cut thành công trong {t_elapsed:.2f}s")
+                    else:
+                        logger.warning(f"⚠️ Shot #{global_shot_idx} cắt lỗi hoặc timeout, bỏ qua.")
 
                     if progress_callback:
-                        msg_str = f"🎬 Đang băm B-Roll Shot {global_shot_idx}/{total_shots}..."
+                        msg_str = f"🎬 Đang băm B-Roll Shot {global_shot_idx}/{total_shots} (High-Quality)..."
                         try:
                             progress_callback(msg_str)
                         except TypeError:
@@ -251,12 +274,13 @@ class VideoEditorService:
             # Tiến hành ghép nối (Concat)
             temp_video_only = os.path.join(temp_dir, "temp_concat_video.mp4")
             cmd_concat = [
-                ffmpeg_executable, "-y", "-nostdin",
+                self.ffmpeg_bin, "-y", "-nostdin",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_list_path,
                 "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "23",
+                "-preset", "slow",
+                "-crf", "17",
+                "-pix_fmt", "yuv420p",
                 "-an", "-sn", "-dn",
                 temp_video_only
             ]
@@ -267,11 +291,12 @@ class VideoEditorService:
             # Ghép audio voiceover nếu có file audio phù hợp
             if voice_path and os.path.exists(voice_path) and voice_path.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')):
                 cmd_final = [
-                    ffmpeg_executable, "-y", "-nostdin",
+                    self.ffmpeg_bin, "-y", "-nostdin",
                     "-i", temp_video_only,
                     "-i", voice_path,
                     "-c:v", "copy",
                     "-c:a", "aac",
+                    "-b:a", "320k",
                     "-shortest",
                     target_out_path
                 ]
@@ -279,7 +304,7 @@ class VideoEditorService:
             else:
                 shutil.copy(temp_video_only, target_out_path)
 
-            logger.info(f"🎉 RENDER HOÀN TẤT VÀ XUẤT FILE THÀNH CÔNG -> {target_out_path}")
+            logger.info(f"🎉 RENDER HIGH-QUALITY HOÀN TẤT VÀ XUẤT FILE THÀNH CÔNG -> {target_out_path}")
             return target_out_path
 
         finally:
