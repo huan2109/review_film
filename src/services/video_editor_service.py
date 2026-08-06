@@ -40,7 +40,7 @@ class SubShot:
 
 class VideoEditorService:
     """
-    Engine Audio-Lead B-Roll Chopper (1:1 Match Subtitle Duration & NVIDIA GPU NVENC Hardware Acceleration).
+    Engine Audio-Lead B-Roll Chopper (RTX 5060 Maximum Performance NVENC GPU Full-Pipeline Acceleration).
     """
 
     def __init__(self, fps: float = 30.0):
@@ -101,7 +101,7 @@ class VideoEditorService:
                 timeout=5
             )
             if res.returncode == 0:
-                logger.info("🚀 TỰ ĐỘNG BẬT TĂNG TỐC PHẦN CỨNG NVIDIA GPU (h264_nvenc)! Render siêu tốc.")
+                logger.info("🚀 BẬT TĂNG TỐC PHẦN CỨNG NVIDIA GPU CỰC HẠN (NVENC RTX FULL-PIPELINE)!")
                 return True
         except Exception:
             pass
@@ -173,78 +173,98 @@ class VideoEditorService:
         duration_sec: float,
         timeout: int = 20,
     ) -> bool:
-        """Cắt phân đoạn video B-Roll (Tùy chọn NVIDIA NVENC GPU / CPU Fallback)."""
-        # Build command dựa trên GPU NVIDIA khả dụng
-        cmd = [self.ffmpeg_bin, "-y", "-nostdin"]
-
+        """
+        Cắt phân đoạn B-Roll tốc độ CỰC HẠN (GPU Full-Pipeline CUDA -> NVENC p1 Low Latency).
+        """
         if self.has_nvidia_gpu:
-            cmd.extend(["-hwaccel", "cuda"])
-
-        cmd.extend([
-            "-i", str(input_path),
-            "-ss", f"{start_sec:.3f}",
-            "-t", f"{duration_sec:.3f}"
-        ])
-
-        if self.has_nvidia_gpu:
-            cmd.extend([
-                "-c:v", "h264_nvenc",
-                "-preset", "p4",
-                "-rc", "vbr",
-                "-cq", "19",
-                "-pix_fmt", "yuv420p"
-            ])
-        else:
-            cmd.extend([
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "18",
-                "-pix_fmt", "yuv420p"
-            ])
-
-        cmd.extend(["-an", "-sn", "-dn", str(output_path)])
-
-        try:
-            result = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout
-            )
-            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return True
-        except Exception as e:
-            logger.warning(f"Thử cắt GPU bị lỗi ({e}), chuyển sang fallback CPU...")
-
-        # Fallback về CPU nếu GPU cut bị từ chối/lỗi
-        if self.has_nvidia_gpu:
-            cmd_cpu = [
+            # 1. Thử GPU Full-Pipeline CUDA Direct VRAM -> NVENC p1
+            cmd_gpu = [
                 self.ffmpeg_bin, "-y", "-nostdin",
+                "-hwaccel", "cuda",
+                "-hwaccel_output_format", "cuda",
                 "-i", str(input_path),
                 "-ss", f"{start_sec:.3f}",
                 "-t", f"{duration_sec:.3f}",
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "18",
+                "-c:v", "h264_nvenc",
+                "-preset", "p1",
+                "-tune", "ll",
+                "-rc", "vbr",
+                "-cq", "19",
+                "-delay", "0",
+                "-surfaces", "32",
                 "-pix_fmt", "yuv420p",
                 "-an", "-sn", "-dn",
                 str(output_path)
             ]
             try:
-                res_cpu = subprocess.run(
-                    cmd_cpu,
+                result = subprocess.run(
+                    cmd_gpu,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=timeout
                 )
-                return res_cpu.returncode == 0
-            except Exception as e:
-                logger.error(f"Lỗi khi cắt video (CPU Fallback): {e}")
-                return False
+                if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return True
+            except Exception:
+                pass
 
-        return False
+            # 2. Thử GPU Standard NVENC (p1 Low Latency)
+            cmd_gpu_std = [
+                self.ffmpeg_bin, "-y", "-nostdin",
+                "-hwaccel", "cuda",
+                "-i", str(input_path),
+                "-ss", f"{start_sec:.3f}",
+                "-t", f"{duration_sec:.3f}",
+                "-c:v", "h264_nvenc",
+                "-preset", "p1",
+                "-tune", "ll",
+                "-rc", "vbr",
+                "-cq", "19",
+                "-delay", "0",
+                "-surfaces", "32",
+                "-pix_fmt", "yuv420p",
+                "-an", "-sn", "-dn",
+                str(output_path)
+            ]
+            try:
+                result_std = subprocess.run(
+                    cmd_gpu_std,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout
+                )
+                if result_std.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return True
+            except Exception:
+                pass
+
+        # 3. Fallback CPU libx264 (fast, crf 18)
+        cmd_cpu = [
+            self.ffmpeg_bin, "-y", "-nostdin",
+            "-i", str(input_path),
+            "-ss", f"{start_sec:.3f}",
+            "-t", f"{duration_sec:.3f}",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-an", "-sn", "-dn",
+            str(output_path)
+        ]
+        try:
+            res_cpu = subprocess.run(
+                cmd_cpu,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout
+            )
+            return res_cpu.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        except Exception as e:
+            logger.error(f"Lỗi khi cắt video (CPU Fallback): {e}")
+            return False
 
     def export_video_with_subtitles(
         self,
@@ -253,75 +273,62 @@ class VideoEditorService:
         output_video: str,
         timeout: int = 120,
     ) -> bool:
-        """Xuất video kèm phụ đề (Hỗ trợ GPU NVENC / CPU Fallback)."""
+        """Xuất video kèm phụ đề (Tối ưu NVENC RTX GPU / CPU Fallback)."""
         clean_srt_path = str(Path(srt_file).resolve()).replace("\\", "/")
         clean_srt_path = clean_srt_path.replace(":", "\\:")
 
-        cmd = [
-            self.ffmpeg_bin, "-y", "-nostdin",
-            "-i", str(input_video),
-            "-vf", f"subtitles='{clean_srt_path}'"
-        ]
-
         if self.has_nvidia_gpu:
-            cmd.extend([
-                "-c:v", "h264_nvenc",
-                "-preset", "p6",
-                "-rc", "vbr",
-                "-cq", "18",
-                "-c:a", "aac",
-                "-b:a", "320k",
-                str(output_video)
-            ])
-        else:
-            cmd.extend([
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "18",
-                "-c:a", "aac",
-                "-b:a", "320k",
-                str(output_video)
-            ])
-
-        try:
-            process = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-            )
-            if process.returncode == 0:
-                return True
-        except Exception as e:
-            logger.warning(f"Lỗi xuất video GPU ({e}), chuyển sang fallback CPU...")
-
-        if self.has_nvidia_gpu:
-            cmd_cpu = [
+            cmd_gpu = [
                 self.ffmpeg_bin, "-y", "-nostdin",
                 "-i", str(input_video),
                 "-vf", f"subtitles='{clean_srt_path}'",
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "18",
+                "-c:v", "h264_nvenc",
+                "-preset", "p3",
+                "-tune", "hq",
+                "-rc", "vbr",
+                "-cq", "18",
+                "-delay", "0",
+                "-surfaces", "32",
                 "-c:a", "aac",
                 "-b:a", "320k",
                 str(output_video)
             ]
             try:
-                proc_cpu = subprocess.run(
-                    cmd_cpu,
+                process = subprocess.run(
+                    cmd_gpu,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=timeout,
                 )
-                return proc_cpu.returncode == 0
+                if process.returncode == 0:
+                    return True
             except Exception as e:
-                logger.error(f"Lỗi xuất video phụ đề CPU: {e}")
-                return False
+                logger.warning(f"Lỗi xuất video GPU ({e}), chuyển sang fallback CPU...")
 
-        return False
+        cmd_cpu = [
+            self.ffmpeg_bin, "-y", "-nostdin",
+            "-i", str(input_video),
+            "-vf", f"subtitles='{clean_srt_path}'",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-c:a", "aac",
+            "-b:a", "320k",
+            str(output_video)
+        ]
+        try:
+            proc_cpu = subprocess.run(
+                cmd_cpu,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+            return proc_cpu.returncode == 0
+        except Exception as e:
+            logger.error(f"Lỗi xuất video phụ đề CPU: {e}")
+            return False
 
     def generate_subshots_for_scene(
         self,
@@ -387,7 +394,7 @@ class VideoEditorService:
         progress_callback=None,
         **kwargs
     ) -> str:
-        """Ghép các B-Roll sub-shots theo chuẩn Match 1:1 ra file MP4 (Tăng Tốc NVIDIA NVENC GPU)."""
+        """Ghép các B-Roll sub-shots theo chuẩn Match 1:1 ra file MP4 (Tốc Độ Cực Hạn NVIDIA RTX NVENC GPU)."""
         srt_file_path = kwargs.get("srt_file_path", voiceover_path)
         output_mp4_path = kwargs.get("output_mp4_path", output_path)
         target_out_path = output_mp4_path if output_mp4_path else output_path
@@ -397,7 +404,7 @@ class VideoEditorService:
             logger.error(f"File Video gốc không tồn tại: {source_video_path}")
             raise FileNotFoundError("Chưa chọn file Video gốc để render!")
 
-        mode_str = "NVIDIA GPU NVENC" if self.has_nvidia_gpu else "CPU libx264"
+        mode_str = "NVIDIA RTX GPU NVENC (MAX SPEED)" if self.has_nvidia_gpu else "CPU libx264"
         logger.info(f"▶️ BẮT ĐẦU RENDER B-ROLL VIDEO ({mode_str}). Executable: {self.ffmpeg_bin} | Script lines: {len(scenes)}")
 
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(target_out_path)), "temp_render_shots")
@@ -468,9 +475,12 @@ class VideoEditorService:
                     "-f", "concat", "-safe", "0",
                     "-i", concat_list_path,
                     "-c:v", "h264_nvenc",
-                    "-preset", "p6",
+                    "-preset", "p3",
+                    "-tune", "hq",
                     "-rc", "vbr",
                     "-cq", "18",
+                    "-delay", "0",
+                    "-surfaces", "32",
                     "-pix_fmt", "yuv420p",
                     "-an", "-sn", "-dn",
                     temp_video_only
