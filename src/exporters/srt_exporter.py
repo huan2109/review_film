@@ -1,5 +1,96 @@
 import os
-from typing import List, Dict, Any
+import re
+import threading
+from pathlib import Path
+from typing import List, Dict, Any, Callable, Optional
+
+
+def _sec_to_srt_timecode(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    millisec = int(round((seconds % 1) * 1000))
+    total_sec = int(seconds)
+    sec = total_sec % 60
+    min_val = (total_sec // 60) % 60
+    hrs = total_sec // 3600
+    if millisec >= 1000:
+        sec += 1
+        millisec = 0
+    if sec >= 60:
+        min_val += 1
+        sec = 0
+    if min_val >= 60:
+        hrs += 1
+        min_val = 0
+    return f"{hrs:02d}:{min_val:02d}:{sec:02d},{millisec:03d}"
+
+
+def export_temp_srt_async(
+    script_text: str,
+    output_srt_path: str,
+    callback_success: Optional[Callable[[str], None]] = None
+):
+    """Hàm chạy ngầm (Background Thread) để tạo file SRT tạm mà không làm treo giao diện GUI."""
+
+    def worker():
+        try:
+            lines = script_text.strip().split("\n")
+            subtitles = []
+
+            for line in lines:
+                line_clean = line.strip().strip("|").strip()
+                if not line_clean:
+                    continue
+
+                parts = [p.strip() for p in line_clean.split("|")]
+
+                if len(parts) >= 3:
+                    text = parts[1]
+                    timecode_raw = parts[2]
+
+                    # 1. Tách mốc HH:MM:SS.mmm hoặc HH:MM:SS
+                    match_hhmmss = re.findall(r"\d{1,2}:\d{2}:\d{2}(?:[,\.]\d{1,3})?", timecode_raw)
+                    if len(match_hhmmss) >= 2:
+                        start_tc = match_hhmmss[0].replace(".", ",")
+                        end_tc = match_hhmmss[1].replace(".", ",")
+                        if "," not in start_tc:
+                            start_tc += ",000"
+                        if "," not in end_tc:
+                            end_tc += ",000"
+                        subtitles.append((start_tc, end_tc, text))
+                    else:
+                        # 2. Tách mốc float seconds (3247.953 -> 3306.261)
+                        sec_matches = re.findall(r"\b\d+(?:\.\d+)?\b", timecode_raw)
+                        if len(sec_matches) >= 2:
+                            in_sec = float(sec_matches[0])
+                            out_sec = float(sec_matches[1])
+                            subtitles.append((_sec_to_srt_timecode(in_sec), _sec_to_srt_timecode(out_sec), text))
+                elif len(parts) == 2:
+                    text = parts[0]
+                    timecode_raw = parts[1]
+                    sec_matches = re.findall(r"\b\d+(?:\.\d+)?\b", timecode_raw)
+                    if len(sec_matches) >= 2:
+                        in_sec = float(sec_matches[0])
+                        out_sec = float(sec_matches[1])
+                        subtitles.append((_sec_to_srt_timecode(in_sec), _sec_to_srt_timecode(out_sec), text))
+
+            # Ghi file với utf-8 chuẩn
+            os.makedirs(os.path.dirname(os.path.abspath(output_srt_path)), exist_ok=True)
+            with open(output_srt_path, "w", encoding="utf-8") as f:
+                for idx, (start, end, text) in enumerate(subtitles, 1):
+                    f.write(f"{idx}\n")
+                    f.write(f"{start} --> {end}\n")
+                    f.write(f"{text}\n\n")
+
+            print("✅ Đã tạo xong file SRT tạm!")
+            if callback_success:
+                callback_success(output_srt_path)
+
+        except Exception as e:
+            print(f"❌ Lỗi khi tạo file SRT: {e}")
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
 
 
 class SRTExporter:
@@ -9,10 +100,6 @@ class SRTExporter:
         self.fps = fps
 
     def export(self, scenes: List[Dict[str, Any]], output_path: str) -> str:
-        """
-        Xuất kịch bản thuyết minh liên tục không có khoảng lặng (no gaps) với mã hóa UTF-8 with BOM.
-        Nếu extension là .txt thì xuất văn bản đọc thuần cho Voice Talent / TTS.
-        """
         if not scenes:
             raise ValueError("Danh sách phân cảnh kịch bản rỗng, không thể xuất file.")
 
@@ -37,8 +124,8 @@ class SRTExporter:
 
             end_sec = current_sec + duration_sec
 
-            start_tc = self._format_srt_timestamp(current_sec)
-            end_tc = self._format_srt_timestamp(end_sec)
+            start_tc = _sec_to_srt_timecode(current_sec)
+            end_tc = _sec_to_srt_timecode(end_sec)
 
             block = f"{idx}\n{start_tc} --> {end_tc}\n{review_text}\n"
             srt_blocks.append(block)
@@ -52,7 +139,6 @@ class SRTExporter:
         return output_path
 
     def export_plain_text(self, scenes: List[Dict[str, Any]], output_path: str) -> str:
-        """Xuất file .txt văn bản thuần cho Voice Talent đọc thu âm hoặc nạp vào TTS."""
         lines = []
         for idx, scene in enumerate(scenes, start=1):
             sec_type = scene.get("section_type", "BODY")
@@ -68,23 +154,4 @@ class SRTExporter:
 
     @staticmethod
     def _format_srt_timestamp(seconds: float) -> str:
-        """Đổi số giây float thành định dạng timecode SRT: HH:MM:SS,mmm."""
-        if seconds < 0:
-            seconds = 0.0
-
-        hrs = int(seconds // 3600)
-        mins = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        millis = int(round((seconds - int(seconds)) * 1000))
-
-        if millis >= 1000:
-            secs += 1
-            millis = 0
-        if secs >= 60:
-            mins += 1
-            secs = 0
-        if mins >= 60:
-            hrs += 1
-            mins = 0
-
-        return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
+        return _sec_to_srt_timecode(seconds)
